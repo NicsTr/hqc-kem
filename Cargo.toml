@@ -1,0 +1,29 @@
+[package]
+name = "hqc-kem"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kem = "=0.4.0-pre.2"
+hybrid-array = { version = "0.4.4", features = ["extra-sizes"] }
+bitvec = { version = "1.0.1", default-features = false }
+cmov = "0.5.2"
+ctutils = { version = "0.4.0", path = "../../utils/ctutils" }
+sha3 = { version = "0.10.8", default-features = false }
+crypto-common = { version = "0.1.7", default-features = false }
+
+[features]
+std = []
+
+[dev-dependencies]
+rand_core = "0.10.0-rc-2"
+rand = "0.10.0-rc.1"
+criterion = "0.7"
+
+[lib]
+bench = false
+
+[[bench]]
+name = "rm_encode_decode"
+harness = false
+
