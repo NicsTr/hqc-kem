@@ -1,7 +1,4 @@
-use core::{
-    fmt::Debug,
-    ops::{Add, AddAssign, Div, Mul, MulAssign, Sub},
-};
+use core::ops::{Add, AddAssign, Div, Mul, MulAssign, Sub};
 
 use hybrid_array::typenum::Unsigned;
 use hybrid_array::{
@@ -21,11 +18,11 @@ pub(crate) trait ExternalCode {
     type KBytes: ArraySize;
     type N: ArraySize;
 
-    type Message: From<Array<u8, Self::KBytes>> + Into<Array<u8, Self::KBytes>> + Debug;
     type CodewordElement;
 
-    fn encode_once(message: &Self::Message) -> Array<Self::CodewordElement, Self::N>;
-    fn decode_once(codeword: &Array<Self::CodewordElement, Self::N>) -> Self::Message;
+    fn encode_bytes(message: &Array<u8, Self::KBytes>) -> Array<Self::CodewordElement, Self::N>;
+    fn decode_to_bytes(codeword: &Array<Self::CodewordElement, Self::N>)
+    -> Array<u8, Self::KBytes>;
 }
 
 pub(crate) trait CtEqZero {
@@ -59,10 +56,13 @@ where
     /// Compute syndromes by evaluating codeword at multiples evaluation points
     /// (successive powers of 2 in the field)
     fn compute_syndromes(codeword: &Array<u8, Self::N>) -> Array<Gf256, Diff<Self::N, Self::K>> {
+        // Ensure this property at compile time.
+        const { assert!(Diff::<Self::N, Self::K>::USIZE + 1 < 256) };
+
         // TODO: Optimize here, by computing evaluation points only once
         // or by precomputing them.
         Array::from_fn(|i| {
-            let alpha = Gf256(2).pow(i + 1);
+            let alpha = Gf256(2).pow((i + 1) as u8);
             let mut v = alpha;
 
             let mut res = Gf256(codeword[0]);
@@ -277,12 +277,11 @@ impl<RS: ShortenedByteReedSolomonParam> ExternalCode for RS {
     type KBytes = RS::K;
     type N = RS::N;
 
-    type Message = Array<u8, RS::K>;
     type CodewordElement = u8;
 
     /// From Lin, Costello, 1983, Section 4.3
-    fn encode_once(message: &Self::Message) -> Array<Self::CodewordElement, Self::N> {
-        let mut c = Array::<Gf256, Self::N>::from_fn(|_| Gf256(0u8));
+    fn encode_bytes(message: &Array<u8, RS::K>) -> Array<Self::CodewordElement, Self::N> {
+        let mut c = Array::<Gf256, Self::N>::default();
 
         let parity_check_size = <Diff<
             <Self as ShortenedByteReedSolomonParam>::N,
@@ -320,7 +319,9 @@ impl<RS: ShortenedByteReedSolomonParam> ExternalCode for RS {
 
     // FIXME:
     /// From Lin, Costello, 1983, Section FIXME
-    fn decode_once(codeword: &Array<Self::CodewordElement, Self::N>) -> Self::Message {
+    fn decode_to_bytes(
+        codeword: &Array<Self::CodewordElement, Self::N>,
+    ) -> Array<u8, Self::KBytes> {
         let syndromes = Self::compute_syndromes(codeword);
 
         let (error_locator_polynomial, n_errors) = Self::compute_elp(&syndromes);
@@ -356,12 +357,12 @@ impl<N: ArraySize + NonZero> From<RsPolynomial<N>> for Array<u8, N> {
 
 impl<N: ArraySize + NonZero> RsPolynomial<N> {
     fn x() -> Self {
-        debug_assert!(N::USIZE > 1);
-        // Correct result is guaranteed since N is at least 2
-        // TODO: find a way to guarantee this at compile time
-        RsPolynomial {
-            coeffs: Array::from_fn(|i| if i == 1 { Gf256(1) } else { Gf256(0) }),
-        }
+        // Ensure polynomial is big enough at compile time.
+        const { assert!(N::USIZE > 1) };
+        let mut coeffs = Array::default();
+        coeffs[1] = Gf256(1);
+
+        RsPolynomial { coeffs }
     }
 
     fn evaluate(&self, point: &Gf256) -> Gf256 {
@@ -377,10 +378,10 @@ impl<N: ArraySize + NonZero> RsPolynomial<N> {
     }
 
     fn one() -> Self {
-        RsPolynomial {
-            // Correct result is guaranteed since N is non-zero
-            coeffs: Array::from_fn(|i| if i == 0 { Gf256(1) } else { Gf256(0) }),
-        }
+        let mut coeffs = Array::default();
+        // Cannot fail since N is non-zero.
+        coeffs[0] = Gf256(1);
+        RsPolynomial { coeffs }
     }
 }
 
@@ -445,10 +446,10 @@ mod test {
     }
 
     fn gen_noise<RS: ShortenedByteReedSolomonParam>(rng: &mut StdRng) -> RsPolynomial<RS::N> {
-        let seed: [u8; _] = rng.random();
-        let mut xof = XofState::new::<U8>(&Array(seed));
+        let seed: [u8; 8] = rng.random();
+        let mut xof = XofState::new(&seed);
         let support: Array<usize, _> =
-            xof.generate_random_support::<Quot<Diff<RS::N, RS::K>, U2>, RS::N>();
+            xof.generate_random_support_biased::<Quot<Diff<RS::N, RS::K>, U2>, RS::N>();
 
         let mut res = Array::default();
         for v in support {
@@ -463,13 +464,13 @@ mod test {
         for _ in 0..100 {
             let message = Array::from_fn(|_| rng.random());
 
-            test_zero_syndrome::<RS>(RS::encode_once(&message));
+            test_zero_syndrome::<RS>(RS::encode_bytes(&message));
         }
 
         for _ in 0..100 {
             let message = Array::from_fn(|_| rng.random());
 
-            let codeword = RS::encode_once(&message);
+            let codeword = RS::encode_bytes(&message);
 
             let noisy_codeword = RsPolynomial::<RS::N>::from(codeword) + gen_noise::<RS>(&mut rng);
 
@@ -483,7 +484,7 @@ mod test {
             202, 48, 44, 62, 103, 240, 103, 102, 145, 190, 93, 206, 31, 140, 78, 229,
         ]);
 
-        let codeword = HQC1ReedSolomon::encode_once(&message);
+        let codeword = HQC1ReedSolomon::encode_bytes(&message);
         let expected = Array([
             239, 195, 82, 1, 191, 86, 194, 73, 235, 59, 99, 202, 210, 230, 140, 79, 62, 75, 6, 172,
             69, 61, 63, 183, 36, 148, 132, 253, 192, 225, 202, 48, 44, 62, 103, 240, 103, 102, 145,
@@ -500,7 +501,7 @@ mod test {
             52, 201, 195, 54, 40, 167,
         ]);
 
-        let codeword = HQC3ReedSolomon::encode_once(&message);
+        let codeword = HQC3ReedSolomon::encode_bytes(&message);
         let expected = Array([
             44, 201, 215, 222, 4, 2, 190, 88, 93, 152, 240, 155, 168, 68, 8, 215, 144, 93, 24, 251,
             90, 214, 184, 242, 160, 152, 248, 59, 193, 106, 117, 53, 198, 223, 10, 99, 149, 248,
@@ -517,7 +518,7 @@ mod test {
             164, 107, 51, 154, 159, 40, 179, 60, 118, 179, 23, 58,
         ]);
 
-        let codeword = HQC5ReedSolomon::encode_once(&message);
+        let codeword = HQC5ReedSolomon::encode_bytes(&message);
         let expected = Array([
             48, 33, 138, 215, 50, 132, 243, 36, 37, 159, 94, 128, 12, 120, 255, 158, 130, 216, 173,
             229, 204, 104, 43, 49, 58, 174, 255, 29, 146, 108, 221, 76, 213, 58, 79, 170, 248, 189,
@@ -592,7 +593,8 @@ mod test {
             //
             // Check that
             for i in 0..RS::N::USIZE {
-                let pos = Gf256(2).pow(i);
+                assert!(i < 256);
+                let pos = Gf256(2).pow(i as u8);
 
                 if noise.coeffs[i] != Gf256(0) {
                     assert_eq!(error_locator_polynomial.evaluate(&pos.inv()), Gf256(0));
@@ -630,7 +632,8 @@ mod test {
             let error_positions = RS::compute_error_positions(&error_locator_polynomial);
 
             for (i, v) in error_positions.iter().enumerate() {
-                let beta = Gf256(2).pow(i);
+                assert!(i < 256);
+                let beta = Gf256(2).pow(i as u8);
 
                 if v.into_option().is_none() {
                     assert_eq!(noise.coeffs[i], Gf256(0));
@@ -699,7 +702,7 @@ mod test {
         for _ in 0..100 {
             let message = Array::<u8, RS::K>::from_fn(|_| rng.random());
 
-            assert_eq!(message, RS::decode_once(&RS::encode_once(&(message))));
+            assert_eq!(message, RS::decode_to_bytes(&RS::encode_bytes(&(message))));
         }
     }
 
@@ -725,10 +728,10 @@ mod test {
             let message = Array::<u8, RS::K>::from_fn(|_| rng.random());
             let noise = gen_noise::<RS>(&mut rng);
 
-            let codeword = &RS::encode_once(&(message));
+            let codeword = &RS::encode_bytes(&(message));
             let noisy_codeword = Array::from_fn(|i| codeword[i] ^ noise.coeffs[i].0);
 
-            assert_eq!(message, RS::decode_once(&noisy_codeword));
+            assert_eq!(message, RS::decode_to_bytes(&noisy_codeword));
         }
     }
 

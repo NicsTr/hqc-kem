@@ -7,6 +7,7 @@ use hybrid_array::{
 };
 
 use ctutils::{Choice, CtAssign, CtEq, CtGt, CtNeg, CtSelect};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 // FIXME: restrict visibility before publishing
 
@@ -17,7 +18,7 @@ pub trait InternalCode {
     type NBytes: ArraySize;
 
     type Message;
-    type Codeword: From<Array<u8, Self::NBytes>> + Into<Array<u8, Self::NBytes>>;
+    type Codeword: From<Array<u8, Self::NBytes>> + IntoBytes;
 
     fn encode_once(message: &Self::Message) -> Self::Codeword;
     fn decode_once(codeword: &Self::Codeword) -> Self::Message;
@@ -34,11 +35,12 @@ pub trait DuplicatedReedMuller17Param
 where
     Self::M: Mul<U16>,
     Prod<Self::M, U16>: ArraySize,
+    <Self::M as ArraySize>::ArrayType<u128>: IntoBytes,
 {
     type M: ArraySize;
 
+    #[inline(always)]
     fn broadcast(bit: bool) -> u128 {
-        // FIXME: look into (2*128).wrapping_neg()
         (bit as u128).wrapping_neg()
     }
 
@@ -114,6 +116,8 @@ impl DuplicatedReedMuller17Param for HQC5ReedMuller {
 
 type ReedMuller17AccumulatedState = [i16; 128];
 
+#[derive(IntoBytes, FromBytes, Immutable)]
+#[repr(transparent)]
 pub struct RMCodeword<M: ArraySize>(Array<u128, M>);
 
 impl<M: ArraySize> From<Array<u8, Prod<M, U16>>> for RMCodeword<M>
@@ -124,22 +128,8 @@ where
     fn from(value: Array<u8, Prod<M, U16>>) -> Self {
         Self(Array::from_fn(|i| {
             // Cannot fail since the slice is of the right size
-            u128::from_be_bytes(value[16 * i..16 * (i + 1)].try_into().unwrap())
+            u128::from_le_bytes(value[16 * i..16 * (i + 1)].try_into().unwrap())
         }))
-    }
-}
-
-impl<M: ArraySize> From<RMCodeword<M>> for Array<u8, Prod<M, U16>>
-where
-    M: Mul<U16>,
-    Prod<M, U16>: ArraySize,
-{
-    fn from(value: RMCodeword<M>) -> Self {
-        let nested_array: Array<_, M> =
-            // U16 = U128/u8::BITS
-            Array::from_fn(|i| Array::<u8, U16>(value.0[i].to_be_bytes()));
-        // Cannot fail since the flattened array is of the right size
-        Array::<u8, Prod<M, U16>>::try_from(nested_array.as_flattened()).unwrap()
     }
 }
 
@@ -147,6 +137,7 @@ impl<RM: DuplicatedReedMuller17Param> InternalCode for RM
 where
     RM::M: Mul<U16>,
     Prod<RM::M, U16>: ArraySize,
+    <<RM as DuplicatedReedMuller17Param>::M as ArraySize>::ArrayType<u128>: IntoBytes,
 {
     type NBytes = Prod<RM::M, U16>;
 
@@ -221,7 +212,7 @@ mod test {
 
     use super::*;
     use hybrid_array::{
-        sizes::{U2, U8, U128},
+        sizes::{U2, U128},
         typenum::Quot,
     };
     use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -247,16 +238,15 @@ mod test {
         Prod<M, U128>: ArraySize,
         Quot<M, U2>: ArraySize,
     {
-        let seed: [u8; _] = rng.random();
-        let mut xof = XofState::new::<U8>(&Array(seed));
+        let seed: [u8; 8] = rng.random();
+        let mut xof = XofState::new(&seed);
         let support: Array<usize, Quot<M, U2>> =
-            xof.generate_random_support::<Quot<M, U2>, Prod<M, U128>>();
+            xof.generate_random_support_biased::<Quot<M, U2>, Prod<M, U128>>();
 
         let mut res = Array::default();
         for v in support {
             res[v / 128] |= 1 << (v % 128);
         }
-        println!("{res:?}");
         RMCodeword(res)
     }
 

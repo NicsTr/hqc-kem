@@ -20,9 +20,8 @@ impl Gf256 {
     }
 
     /// Constant time square-and-multiply exponentiation.
-    pub(crate) fn pow(self, exp: usize) -> Self {
+    pub(crate) fn pow(self, exp: u8) -> Self {
         let mut res = Gf256(1);
-        let exp = (exp % 255) as u8;
         for i in 0..u8::BITS {
             // Square
             res *= res;
@@ -184,9 +183,9 @@ mod test {
     #[test]
     fn test_multiplicative_order() {
         let a = Gf256(2);
-        let mut c = 1;
+        let mut c = 1usize;
 
-        while a.pow(c) != Gf256(1) && c < 1000 {
+        while a.pow(c as u8) != Gf256(1) && c < 256 {
             c += 1;
         }
         assert_eq!(c, 255);
