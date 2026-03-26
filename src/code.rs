@@ -4,128 +4,99 @@ use hybrid_array::{
     Array, ArraySize,
     typenum::{Prod, Unsigned},
 };
-use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 use crate::code::{
-    reed_muller::{HQC1ReedMuller, HQC3ReedMuller, HQC5ReedMuller, InternalCode},
-    reed_solomon::{ExternalCode, HQC1ReedSolomon, HQC3ReedSolomon, HQC5ReedSolomon},
+    reed_muller::{DuplicatedReedMuller17Param, InternalCode},
+    reed_solomon::{ExternalCode, ShortenedByteReedSolomonParam},
 };
 
 mod gf256;
-pub mod reed_muller;
-pub mod reed_solomon;
+mod reed_muller;
+mod reed_solomon;
+
+pub trait CodeParams: ShortenedByteReedSolomonParam + DuplicatedReedMuller17Param {
+    type CodewordBytesize: ArraySize;
+}
+
+impl<C: ShortenedByteReedSolomonParam + DuplicatedReedMuller17Param> CodeParams for C
+where
+    Self::InternalCodewordBytesize: Mul<Self::ExternalCodewordBytesize>,
+    Prod<Self::InternalCodewordBytesize, Self::ExternalCodewordBytesize>: ArraySize,
+{
+    type CodewordBytesize = Prod<C::InternalCodewordBytesize, C::ExternalCodewordBytesize>;
+}
 
 /// A `Code` is something that encodes a `KBytes` message into
 /// an `NBytes` codeword.
 ///
 /// Interface for the error-correcting code used in HQC
-pub(crate) trait Code {
-    type KBytes: ArraySize;
-    type NBytes: ArraySize;
+pub(crate) trait Code: CodeParams {
+    fn encode(
+        message: &Array<u8, Self::ExternalMessageBytesize>,
+    ) -> Array<u8, Self::CodewordBytesize> {
+        const {
+            assert!(
+                Self::CodewordBytesize::USIZE.is_multiple_of(Self::InternalCodewordBytesize::USIZE)
+            )
+        }
 
-    type Message: IntoBytes + Immutable + From<Array<u8, Self::KBytes>>;
-    type Codeword: IntoBytes + From<Array<u8, Self::NBytes>> + FromBytes + Immutable;
+        // TODO: Check that there is not too much copy here
+        // TODO: Maybe use .flatten
+        let mut res = Array::default();
+        for (a, b) in res
+            .chunks_exact_mut(Self::InternalCodewordBytesize::USIZE)
+            .zip(Self::encode_external(message))
+        {
+            a.copy_from_slice(&Self::encode_internal(&b)[..]);
+        }
+        res
+    }
 
-    fn encode_once(message: &Self::Message) -> Self::Codeword;
-    fn decode_once(codeword: &Self::Codeword) -> Self::Message;
-}
+    fn decode(
+        codeword: &Array<u8, Self::CodewordBytesize>,
+    ) -> Array<u8, Self::ExternalMessageBytesize> {
+        const {
+            assert!(
+                Self::CodewordBytesize::USIZE.is_multiple_of(Self::InternalCodewordBytesize::USIZE)
+            )
+        }
 
-pub(crate) trait Concatenated
-where
-    <Self::InternalCode as InternalCode>::NBytes: Mul<<Self::ExternalCode as ExternalCode>::N>,
-    Prod<<Self::InternalCode as InternalCode>::NBytes, <Self::ExternalCode as ExternalCode>::N>:
-        ArraySize,
-    <<Self::ExternalCode as ExternalCode>::KBytes as ArraySize>::ArrayType<u8>:
-        IntoBytes + Immutable,
-    <<Self::ExternalCode as ExternalCode>::N as ArraySize>::ArrayType<
-        <Self::InternalCode as InternalCode>::Codeword,
-    >: IntoBytes + FromBytes + Immutable,
-{
-    type InternalCode: InternalCode;
-    type ExternalCode: ExternalCode<CodewordElement = <Self::InternalCode as InternalCode>::Message>;
-}
+        // TODO: Check that there is not too much copy here
+        // TODO: Maybe use .unflatten
+        let mut external_codeword = Array::default();
+        for (a, b) in codeword
+            .chunks_exact(Self::InternalCodewordBytesize::USIZE)
+            .zip(external_codeword.iter_mut())
+        {
+            let mut internal_codeword = Array::default();
+            // Cannot panic since slices are equal size (guaranteed by chunk exact)
+            internal_codeword[..].copy_from_slice(a);
+            *b = Self::decode_internal(&internal_codeword)
+        }
 
-#[derive(Clone, IntoBytes, FromBytes, Immutable)]
-#[repr(transparent)]
-pub(crate) struct ConcatenatedCodeword<ICode: InternalCode, ECode: ExternalCode>(
-    Array<ICode::Codeword, ECode::N>,
-);
-
-impl<ICode: InternalCode, ECode: ExternalCode> From<Array<u8, Prod<ICode::NBytes, ECode::N>>>
-    for ConcatenatedCodeword<ICode, ECode>
-where
-    ICode::NBytes: Mul<ECode::N>,
-    Prod<ICode::NBytes, ECode::N>: ArraySize,
-{
-    // TODO: Check that we do not lose to much performance here (think about using Zerocopy)
-    fn from(value: Array<u8, Prod<ICode::NBytes, ECode::N>>) -> Self {
-        let icode_nbytes = <ICode::NBytes as Unsigned>::USIZE;
-        Self(Array::from_fn(|i| {
-            let tmp: Array<u8, ICode::NBytes> = value[icode_nbytes * i..icode_nbytes * (i + 1)]
-                .try_into()
-                // Cannot fail since slice is correctly computed
-                .unwrap();
-
-            tmp.into()
-        }))
+        Self::decode_external(&external_codeword)
     }
 }
 
-impl<C: Concatenated> Code for C {
-    type KBytes = <C::ExternalCode as ExternalCode>::KBytes;
-    type NBytes =
-        Prod<<C::InternalCode as InternalCode>::NBytes, <C::ExternalCode as ExternalCode>::N>;
-
-    type Message = Array<u8, <C::ExternalCode as ExternalCode>::KBytes>;
-    // type Message = ConcatenatedMessage<C::ExternalCode>;
-    type Codeword = ConcatenatedCodeword<C::InternalCode, C::ExternalCode>;
-
-    fn encode_once(message: &Self::Message) -> Self::Codeword {
-        ConcatenatedCodeword(C::InternalCode::encode_array(
-            &C::ExternalCode::encode_bytes(message),
-        ))
-    }
-
-    fn decode_once(codeword: &Self::Codeword) -> Self::Message {
-        C::ExternalCode::decode_to_bytes(&C::InternalCode::decode_array(&codeword.0))
-    }
-}
-
-pub(crate) struct HQC1Code;
-pub(crate) struct HQC3Code;
-pub(crate) struct HQC5Code;
-
-impl Concatenated for HQC1Code {
-    type InternalCode = HQC1ReedMuller;
-    type ExternalCode = HQC1ReedSolomon;
-}
-
-impl Concatenated for HQC3Code {
-    type InternalCode = HQC3ReedMuller;
-    type ExternalCode = HQC3ReedSolomon;
-}
-
-impl Concatenated for HQC5Code {
-    type InternalCode = HQC5ReedMuller;
-    type ExternalCode = HQC5ReedSolomon;
-}
+impl<C: CodeParams> Code for C {}
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::utils::XofState;
+    use crate::{Hqc1, Hqc3, Hqc5, hash::XofState};
     use hybrid_array::sizes::{U2880, U4896, U8516, U17088, U35664, U49856};
-    use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
+    use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
+    use zerocopy::IntoBytes;
 
     fn test_perfect_channel<C: Code>(seed: u64) {
         let mut rng = StdRng::seed_from_u64(seed);
 
         for _ in 0..=300 {
-            let mut message = Array::<u8, C::KBytes>::default();
+            let mut message = Array::<u8, C::ExternalMessageBytesize>::default();
             rng.fill_bytes(&mut message);
-            let codeword = C::encode_once(&message.clone().into());
+            let codeword = C::encode(&message);
 
-            assert_eq!(message.as_bytes(), C::decode_once(&codeword).as_bytes());
+            assert_eq!(message.as_bytes(), C::decode(&codeword).as_bytes());
         }
     }
 
@@ -145,10 +116,10 @@ mod test {
         let mut rng = StdRng::seed_from_u64(seed);
 
         for _ in 0..=100 {
-            let mut message = Array::<u8, C::KBytes>::default();
+            let mut message = Array::<u8, C::ExternalMessageBytesize>::default();
             rng.fill_bytes(&mut message);
 
-            let mut codeword = C::encode_once(&message.clone().into());
+            let mut codeword = C::encode(&message.clone());
 
             let noise = gen_binary_noise::<W, N>(&mut rng);
             for (i, v) in noise.iter().enumerate() {
@@ -157,70 +128,40 @@ mod test {
                 }
             }
 
-            assert_eq!(message.as_bytes(), C::decode_once(&codeword).as_bytes());
+            assert_eq!(message, C::decode(&codeword));
         }
-    }
-
-    fn test_from_into_bytes<C: Code>(seed: u64) {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let mut message_raw = Array::<u8, C::KBytes>::default();
-        rng.fill_bytes(&mut message_raw);
-        let message: <C as Code>::Message = message_raw.clone().into();
-
-        assert_eq!(message_raw.as_bytes(), message.as_bytes());
-
-        let mut codeword_raw = Array::<u8, C::NBytes>::default();
-        rng.fill_bytes(&mut codeword_raw);
-        let codeword: <C as Code>::Codeword = codeword_raw.clone().into();
-
-        assert_eq!(codeword_raw.as_bytes(), codeword.as_bytes());
     }
 
     #[test]
     fn test_hqc1_noisy_channel() {
         // Slightly smaller noise length and weight, to use available sizes
-        test_noisy_channel::<HQC1Code, U2880, U17088>(1437);
+        test_noisy_channel::<Hqc1, U2880, U17088>(1437);
     }
 
     #[test]
     fn test_hqc3_noisy_channel() {
         // Slightly smaller noise length and weight, to use available sizes
-        test_noisy_channel::<HQC3Code, U4896, U35664>(1438);
+        test_noisy_channel::<Hqc3, U4896, U35664>(1438);
     }
 
     #[test]
     fn test_hqc5_noisy_channel() {
         // Slightly smaller noise length and weight, to use available sizes
-        test_noisy_channel::<HQC5Code, U8516, U49856>(1439);
+        test_noisy_channel::<Hqc5, U8516, U49856>(1439);
     }
 
     #[test]
     fn test_hqc1_perfect_channel() {
-        test_perfect_channel::<HQC1Code>(1337);
+        test_perfect_channel::<Hqc1>(1337);
     }
 
     #[test]
     fn test_hqc3_perfect_channel() {
-        test_perfect_channel::<HQC3Code>(1338);
+        test_perfect_channel::<Hqc3>(1338);
     }
 
     #[test]
     fn test_hqc5_perfect_channel() {
-        test_perfect_channel::<HQC5Code>(1339);
-    }
-
-    #[test]
-    fn test_hqc1_from_into_bytes() {
-        test_from_into_bytes::<HQC1Code>(1537);
-    }
-
-    #[test]
-    fn test_hqc3_from_into_bytes() {
-        test_from_into_bytes::<HQC3Code>(1538);
-    }
-
-    #[test]
-    fn test_hqc5_from_into_bytes() {
-        test_from_into_bytes::<HQC5Code>(1539);
+        test_perfect_channel::<Hqc5>(1339);
     }
 }

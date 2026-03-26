@@ -1,18 +1,19 @@
-use core::ops::{Add, Div, Sub};
-
-use crypto_common::OutputSizeUser;
 use ctutils::{Choice, CtAssign, CtEq, CtLt, CtSelect};
 use hybrid_array::{
     Array, ArraySize,
-    sizes::{U1, U64},
-    typenum::{Diff, Quot, Sum, Unsigned},
+    sizes::{U8, U64},
+    typenum::Unsigned,
 };
+use kem::{Kem, KeyExport};
 use sha3::{
     Digest, Sha3_256, Sha3_512, Shake256, Shake256Reader,
     digest::{ExtendableOutput, Update, XofReader},
 };
+use zerocopy::IntoBytes;
 
-use crate::polynomial::BinaryPolynomial;
+use crate::{
+    kem::Ciphertext, pke::PkeParams, polynomial::BinaryPolynomial, size_traits::WordsizeFromBitsize,
+};
 
 const XOF_DOMAIN_SEPARATOR: u8 = 1;
 const G_DOMAIN_SEPARATOR: u8 = 0;
@@ -20,35 +21,48 @@ const H_DOMAIN_SEPARATOR: u8 = 1;
 const I_DOMAIN_SEPARATOR: u8 = 2;
 const J_DOMAIN_SEPARATOR: u8 = 3;
 
-#[inline]
-fn hash_helper<H: Digest>(
-    input: &[u8],
-    domain_separator: u8,
-) -> Array<u8, <H as OutputSizeUser>::OutputSize>
-where
-    H::OutputSize: ArraySize,
-{
-    let h = H::new_with_prefix(input)
-        .chain_update([domain_separator])
-        .finalize();
-    // Cannot fail since H::OutputSize is exactly the size of the returned Array
-    Array::try_from(&h[..]).expect("size invariant violated")
+pub(crate) fn hash_g<P: PkeParams>(
+    h: &[u8; 32],
+    m: &Array<u8, P::ExternalMessageBytesize>,
+    salt: &[u8; 16],
+) -> [u8; 64] {
+    Sha3_512::new()
+        .chain_update(h)
+        .chain_update(m.as_bytes())
+        .chain_update(salt)
+        .chain_update([G_DOMAIN_SEPARATOR])
+        .finalize()
+        .into()
 }
 
-pub(crate) fn hash_g(input: &[u8; 32]) -> [u8; 64] {
-    hash_helper::<Sha3_512>(input, G_DOMAIN_SEPARATOR).into()
-}
-
-pub(crate) fn hash_h(input: &[u8; 32]) -> [u8; 32] {
-    hash_helper::<Sha3_256>(input, H_DOMAIN_SEPARATOR).into()
+pub(crate) fn hash_h<K: Kem>(ek: &K::EncapsulationKey) -> [u8; 32] {
+    Sha3_256::new()
+        .chain_update(ek.to_bytes())
+        .chain_update([H_DOMAIN_SEPARATOR])
+        .finalize()
+        .into()
 }
 
 pub(crate) fn hash_i(input: &[u8; 32]) -> [u8; 64] {
-    hash_helper::<Sha3_512>(input, I_DOMAIN_SEPARATOR).into()
+    Sha3_512::new()
+        .chain_update(input)
+        .chain_update([I_DOMAIN_SEPARATOR])
+        .finalize()
+        .into()
 }
 
-pub(crate) fn hash_j(input: &[u8; 32]) -> [u8; 32] {
-    hash_helper::<Sha3_256>(input, J_DOMAIN_SEPARATOR).into()
+pub(crate) fn hash_j<P: PkeParams>(
+    h: &[u8; 32],
+    rejection_randomness: &Array<u8, P::ExternalMessageBytesize>,
+    ciphertext: &Ciphertext<P>,
+) -> [u8; 32] {
+    Sha3_256::new()
+        .chain_update(h)
+        .chain_update(rejection_randomness)
+        .chain_update(Array::<u8, _>::from(ciphertext))
+        .chain_update([J_DOMAIN_SEPARATOR])
+        .finalize()
+        .into()
 }
 
 /// Performs the constant-time Barret modular reduction of `value` modulo `N`.
@@ -138,7 +152,7 @@ impl XofState {
             }
 
             let reduced_candidate = barret_reduction::<N>(candidate) as usize;
-            if res[..i].iter().any(|p| *p == reduced_candidate) {
+            if res[..i].contains(&reduced_candidate) {
                 continue;
             }
 
@@ -177,51 +191,41 @@ impl XofState {
         res
     }
 
-    pub(crate) fn sample_fixed_weight_vect_rejection<W: ArraySize, NBits>(
+    pub(crate) fn sample_fixed_weight_vect_rejection<
+        W: ArraySize,
+        NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>,
+    >(
         &mut self,
-    ) -> BinaryPolynomial<NBits>
-    where
-        NBits: Sub<U1> + Unsigned,
-        Diff<NBits, U1>: Div<U64>,
-        Quot<Diff<NBits, U1>, U64>: Add<U1>,
-        Sum<Quot<Diff<NBits, U1>, U64>, U1>: ArraySize,
-    {
+    ) -> BinaryPolynomial<NBits> {
         let mut res = BinaryPolynomial::zero();
 
         for v in self.generate_random_support_rejection::<W, NBits>() {
             res.set_coefficient(v);
         }
 
-        res.into()
+        res
     }
 
     /// Sample a fixed weight bin.
-    pub(crate) fn sample_fixed_weight_vect_biased<W: ArraySize, NBits>(
+    pub(crate) fn sample_fixed_weight_vect_biased<
+        W: ArraySize,
+        NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>,
+    >(
         &mut self,
-    ) -> BinaryPolynomial<NBits>
-    where
-        NBits: Sub<U1> + Unsigned,
-        Diff<NBits, U1>: Div<U64>,
-        Quot<Diff<NBits, U1>, U64>: Add<U1>,
-        Sum<Quot<Diff<NBits, U1>, U64>, U1>: ArraySize,
-    {
+    ) -> BinaryPolynomial<NBits> {
         let mut res = BinaryPolynomial::zero();
 
         for v in self.generate_random_support_biased::<W, NBits>() {
             res.set_coefficient(v);
         }
 
-        res.into()
+        res
     }
 
     /// Sample a vector uniformly at random.
-    pub(crate) fn sample_vect<NBits>(&mut self) -> BinaryPolynomial<NBits>
-    where
-        NBits: Sub<U1> + Unsigned,
-        Diff<NBits, U1>: Div<U64>,
-        Quot<Diff<NBits, U1>, U64>: Add<U1>,
-        Sum<Quot<Diff<NBits, U1>, U64>, U1>: ArraySize,
-    {
+    pub(crate) fn sample_vect<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>>(
+        &mut self,
+    ) -> BinaryPolynomial<NBits> {
         Array::from_fn(|_| {
             let mut buf: [u8; 8] = Default::default();
             self.0.read(&mut buf);
@@ -236,7 +240,7 @@ mod test {
     use hybrid_array::sizes::{U1, U10, U100, U124, U128};
     use hybrid_array::typenum::consts::U4294967295;
 
-    use crate::utils::{XofState, barret_reduction};
+    use super::{XofState, barret_reduction};
 
     #[test]
     fn test_generate_random_support_biased() {

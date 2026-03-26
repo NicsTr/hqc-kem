@@ -10,20 +10,115 @@ use hybrid_array::{
 use ctutils::{Choice, CtAssign, CtEq, CtGt, CtOption, CtSelect};
 
 use crate::code::gf256::Gf256;
+use crate::{Hqc1, Hqc3, Hqc5};
 
-/// An `ExternalCode` is something that encodes a `KBytes` bytes message into
-/// an array of `N` `CodewordElement`s. Those elements are meant
-/// to be later encoded by an `InternalCode`.
-pub(crate) trait ExternalCode {
-    type KBytes: ArraySize;
-    type N: ArraySize;
-
-    type CodewordElement;
-
-    fn encode_bytes(message: &Array<u8, Self::KBytes>) -> Array<Self::CodewordElement, Self::N>;
-    fn decode_to_bytes(codeword: &Array<Self::CodewordElement, Self::N>)
-    -> Array<u8, Self::KBytes>;
+impl ShortenedByteReedSolomonParam for Hqc1 {
+    type ExternalMessageBytesize = U16;
+    type ExternalCodewordBytesize = U46;
+    const GEN_POLY: Array<u8, Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>> =
+        Array([
+            89, 69, 153, 116, 176, 117, 111, 75, 73, 233, 242, 233, 65, 210, 21, 139, 103, 173, 67,
+            118, 105, 210, 174, 110, 74, 69, 228, 82, 255, 181,
+        ]);
 }
+
+impl ShortenedByteReedSolomonParam for Hqc3 {
+    type ExternalMessageBytesize = U24;
+    type ExternalCodewordBytesize = U56;
+    const GEN_POLY: Array<u8, Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>> =
+        Array([
+            45, 216, 239, 24, 253, 104, 27, 40, 107, 50, 163, 210, 227, 134, 224, 158, 119, 13,
+            158, 1, 238, 164, 82, 43, 15, 232, 246, 142, 50, 189, 29, 232,
+        ]);
+}
+
+impl ShortenedByteReedSolomonParam for Hqc5 {
+    type ExternalMessageBytesize = U32;
+    type ExternalCodewordBytesize = U90;
+    const GEN_POLY: Array<u8, Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>> =
+        Array([
+            49, 167, 49, 39, 200, 121, 124, 91, 240, 63, 148, 71, 150, 123, 87, 101, 32, 215, 159,
+            71, 201, 115, 97, 210, 186, 183, 141, 217, 123, 12, 31, 243, 180, 219, 152, 239, 99,
+            141, 4, 246, 191, 144, 8, 232, 47, 27, 141, 178, 130, 64, 124, 47, 39, 188, 216, 48,
+            199, 187,
+        ]);
+}
+
+// Parameters and implementation have different visibilities
+pub trait ShortenedByteReedSolomonParam: Clone
+where
+    Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>:
+        ArraySize + NonZero + Div<U2>,
+    Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>:
+        ArraySize + Add<U1>,
+    Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>:
+        ArraySize + NonZero,
+{
+    type ExternalMessageBytesize: ArraySize;
+    type ExternalCodewordBytesize: ArraySize + NonZero + Sub<Self::ExternalMessageBytesize>;
+    const GEN_POLY: Array<u8, Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>>;
+}
+
+/// An `ExternalCode` is something that encodes a `MessageBytesize` bytes message into
+/// an array of `CodewordBytesize` bytes. Those elements are meant
+/// to be later encoded by an `InternalCode`.
+pub(crate) trait ExternalCode: ShortenedByteReedSolomon {
+    /// From Lin, Costello, 1983, Section 4.3
+    fn encode_external(
+        message: &Array<u8, Self::ExternalMessageBytesize>,
+    ) -> Array<u8, Self::ExternalCodewordBytesize> {
+        let mut c = Array::<Gf256, Self::ExternalCodewordBytesize>::default();
+
+        let parity_check_size = Self::ParityCheckBytesize::USIZE;
+        let dimension = Self::ExternalMessageBytesize::USIZE;
+
+        for i in 0..dimension {
+            let gate = Gf256(message[dimension - 1 - i]) + c[parity_check_size - 1];
+
+            let tmp: Array<Gf256, Self::ParityCheckBytesize> =
+                Array::from_fn(|i| gate * Gf256(Self::GEN_POLY[i]));
+
+            // Add gated value and clock one time
+            for k in (1..parity_check_size).rev() {
+                c[k] = c[k - 1] + tmp[k];
+            }
+
+            c[0] = tmp[0];
+        }
+
+        Array::from_fn(|i| {
+            if i < parity_check_size {
+                c[i].0
+            } else {
+                message[i - parity_check_size]
+            }
+        })
+    }
+
+    // FIXME:
+    /// From Lin, Costello, 1983, Section FIXME
+    fn decode_external(
+        codeword: &Array<u8, Self::ExternalCodewordBytesize>,
+    ) -> Array<u8, Self::ExternalMessageBytesize> {
+        let syndromes = Self::compute_syndromes(codeword);
+
+        let (error_locator_polynomial, n_errors) = Self::compute_elp(&syndromes);
+        let error_positions = Self::compute_error_positions(&error_locator_polynomial);
+        let z = Self::compute_z(error_locator_polynomial, syndromes, n_errors);
+        let error_values = Self::compute_error_values(error_positions, z);
+
+        Array::from_fn(|i| {
+            error_values
+                [Diff::<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>::USIZE + i]
+                .0
+                ^ codeword
+                    [Diff::<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>::USIZE
+                        + i]
+        })
+    }
+}
+
+impl<RS: ShortenedByteReedSolomonParam> ExternalCode for RS {}
 
 pub(crate) trait CtEqZero {
     fn ct_eq_zero(&self) -> Choice;
@@ -43,21 +138,21 @@ impl CtEqZero for u8 {
     }
 }
 
-pub(crate) trait ShortenedByteReedSolomonParam
-where
-    Diff<Self::N, Self::K>: ArraySize + NonZero + Div<U2>,
-    Quot<Diff<Self::N, Self::K>, U2>: ArraySize + Add<U1>,
-    Sum<Quot<Diff<Self::N, Self::K>, U2>, U1>: ArraySize + NonZero,
-{
-    type K: ArraySize;
-    type N: ArraySize + NonZero + Sub<Self::K>;
-    const GEN_POLY: Array<u8, Diff<Self::N, Self::K>>;
+pub(crate) trait ShortenedByteReedSolomon: ShortenedByteReedSolomonParam {
+    type ParityCheckBytesize: ArraySize;
 
     /// Compute syndromes by evaluating codeword at multiples evaluation points
     /// (successive powers of 2 in the field)
-    fn compute_syndromes(codeword: &Array<u8, Self::N>) -> Array<Gf256, Diff<Self::N, Self::K>> {
+    fn compute_syndromes(
+        codeword: &Array<u8, Self::ExternalCodewordBytesize>,
+    ) -> Array<Gf256, Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>> {
         // Ensure this property at compile time.
-        const { assert!(Diff::<Self::N, Self::K>::USIZE + 1 < 256) };
+        const {
+            assert!(
+                Diff::<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>::USIZE + 1
+                    < 256
+            )
+        };
 
         // TODO: Optimize here, by computing evaluation points only once
         // or by precomputing them.
@@ -66,7 +161,7 @@ where
             let mut v = alpha;
 
             let mut res = Gf256(codeword[0]);
-            for j in 1..<Self::N as Unsigned>::USIZE {
+            for j in 1..Self::ExternalCodewordBytesize::USIZE {
                 res += v * Gf256(codeword[j]);
                 v *= alpha;
             }
@@ -81,8 +176,16 @@ where
     ///
     /// Be careful to do it in constant time.
     fn compute_elp(
-        syndromes: &Array<Gf256, Diff<Self::N, Self::K>>,
-    ) -> (RsPolynomial<Sum<Quot<Diff<Self::N, Self::K>, U2>, U1>>, u8) {
+        syndromes: &Array<
+            Gf256,
+            Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>,
+        >,
+    ) -> (
+        RsPolynomial<
+            Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>,
+        >,
+        u8,
+    ) {
         // Start with initial values for mu = 0
         let mut x_sigma_p = RsPolynomial::x();
         let mut d_p = Gf256(1);
@@ -92,8 +195,10 @@ where
         let mut d_mu = syndromes[0];
         let mut degree_sigma_mu = 0;
 
-        let parity_check_size = Diff::<Self::N, Self::K>::USIZE;
-        let max_correctable_error = Quot::<Diff<Self::N, Self::K>, U2>::USIZE;
+        let parity_check_size =
+            Diff::<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>::USIZE;
+        let max_correctable_error =
+            Quot::<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>::USIZE;
 
         // Iterate the berlekamp algorithm
         for mu in 0..parity_check_size {
@@ -168,8 +273,10 @@ where
     // Maybe Horner's method, Chien search, or FFT-based method
     // (like in the HQC reference implementation).
     fn compute_error_positions(
-        elp_poly: &RsPolynomial<Sum<Quot<Diff<Self::N, Self::K>, U2>, U1>>,
-    ) -> Array<CtOption<Gf256>, Self::N> {
+        elp_poly: &RsPolynomial<
+            Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>,
+        >,
+    ) -> Array<CtOption<Gf256>, Self::ExternalCodewordBytesize> {
         let mut beta = Gf256(1);
         let mut beta_inv = Gf256(1);
         let inv_two = Gf256(2).inv(); // TODO: make it const
@@ -189,13 +296,21 @@ where
 
     /// Compute the "Z" polynomial from the error-locator polynomial and the syndromes.
     fn compute_z(
-        elp_poly: RsPolynomial<Sum<Quot<Diff<Self::N, Self::K>, U2>, U1>>,
-        syndromes: Array<Gf256, Diff<Self::N, Self::K>>,
+        elp_poly: RsPolynomial<
+            Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>,
+        >,
+        syndromes: Array<
+            Gf256,
+            Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>,
+        >,
         n_errors: u8,
-    ) -> RsPolynomial<Sum<Quot<Diff<Self::N, Self::K>, U2>, U1>> {
+    ) -> RsPolynomial<
+        Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>,
+    > {
         let mut z = elp_poly.clone();
 
-        let max_correctable_error = Quot::<Diff<Self::N, Self::K>, U2>::USIZE;
+        let max_correctable_error =
+            Quot::<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>::USIZE;
         for i in 1..=max_correctable_error {
             z.coeffs[i] += syndromes[i - 1].ct_select(&Gf256(0), i.ct_gt(&(n_errors as usize)));
 
@@ -212,9 +327,11 @@ where
     ///
     // TODO: compute only on the relevant values (the last N - K)
     fn compute_error_values(
-        mut error_positions: Array<CtOption<Gf256>, Self::N>,
-        z: RsPolynomial<Sum<Quot<Diff<Self::N, Self::K>, U2>, U1>>,
-    ) -> Array<Gf256, Self::N> {
+        mut error_positions: Array<CtOption<Gf256>, Self::ExternalCodewordBytesize>,
+        z: RsPolynomial<
+            Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>,
+        >,
+    ) -> Array<Gf256, Self::ExternalCodewordBytesize> {
         let mut beta_inv = Gf256(1);
         let inv_two = Gf256(2).inv(); // TODO: make it const
 
@@ -241,99 +358,8 @@ where
     }
 }
 
-pub(crate) struct HQC1ReedSolomon;
-pub(crate) struct HQC3ReedSolomon;
-pub(crate) struct HQC5ReedSolomon;
-
-impl ShortenedByteReedSolomonParam for HQC1ReedSolomon {
-    type K = U16;
-    type N = U46;
-    const GEN_POLY: Array<u8, Diff<Self::N, Self::K>> = Array([
-        89, 69, 153, 116, 176, 117, 111, 75, 73, 233, 242, 233, 65, 210, 21, 139, 103, 173, 67,
-        118, 105, 210, 174, 110, 74, 69, 228, 82, 255, 181,
-    ]);
-}
-
-impl ShortenedByteReedSolomonParam for HQC3ReedSolomon {
-    type K = U24;
-    type N = U56;
-    const GEN_POLY: Array<u8, Diff<Self::N, Self::K>> = Array([
-        45, 216, 239, 24, 253, 104, 27, 40, 107, 50, 163, 210, 227, 134, 224, 158, 119, 13, 158, 1,
-        238, 164, 82, 43, 15, 232, 246, 142, 50, 189, 29, 232,
-    ]);
-}
-
-impl ShortenedByteReedSolomonParam for HQC5ReedSolomon {
-    type K = U32;
-    type N = U90;
-    const GEN_POLY: Array<u8, Diff<Self::N, Self::K>> = Array([
-        49, 167, 49, 39, 200, 121, 124, 91, 240, 63, 148, 71, 150, 123, 87, 101, 32, 215, 159, 71,
-        201, 115, 97, 210, 186, 183, 141, 217, 123, 12, 31, 243, 180, 219, 152, 239, 99, 141, 4,
-        246, 191, 144, 8, 232, 47, 27, 141, 178, 130, 64, 124, 47, 39, 188, 216, 48, 199, 187,
-    ]);
-}
-
-impl<RS: ShortenedByteReedSolomonParam> ExternalCode for RS {
-    type KBytes = RS::K;
-    type N = RS::N;
-
-    type CodewordElement = u8;
-
-    /// From Lin, Costello, 1983, Section 4.3
-    fn encode_bytes(message: &Array<u8, RS::K>) -> Array<Self::CodewordElement, Self::N> {
-        let mut c = Array::<Gf256, Self::N>::default();
-
-        let parity_check_size = <Diff<
-            <Self as ShortenedByteReedSolomonParam>::N,
-            <Self as ShortenedByteReedSolomonParam>::K,
-        > as Unsigned>::USIZE;
-        let dimension = <<Self as ShortenedByteReedSolomonParam>::K as Unsigned>::USIZE;
-
-        for i in 0..dimension {
-            let gate = Gf256(message[dimension - 1 - i]) + c[parity_check_size - 1];
-
-            let tmp: Array<
-                Gf256,
-                Diff<
-                    <Self as ShortenedByteReedSolomonParam>::N,
-                    <Self as ShortenedByteReedSolomonParam>::K,
-                >,
-            > = Array::from_fn(|i| gate * Gf256(Self::GEN_POLY[i]));
-
-            // Add gated value and clock one time
-            for k in (1..parity_check_size).rev() {
-                c[k] = c[k - 1] + tmp[k];
-            }
-
-            c[0] = tmp[0];
-        }
-
-        Array::from_fn(|i| {
-            if i < parity_check_size {
-                c[i].0
-            } else {
-                message[i - parity_check_size]
-            }
-        })
-    }
-
-    // FIXME:
-    /// From Lin, Costello, 1983, Section FIXME
-    fn decode_to_bytes(
-        codeword: &Array<Self::CodewordElement, Self::N>,
-    ) -> Array<u8, Self::KBytes> {
-        let syndromes = Self::compute_syndromes(codeword);
-
-        let (error_locator_polynomial, n_errors) = Self::compute_elp(&syndromes);
-        let error_positions = Self::compute_error_positions(&error_locator_polynomial);
-        let z = Self::compute_z(error_locator_polynomial, syndromes, n_errors);
-        let error_values = Self::compute_error_values(error_positions, z);
-
-        Array::from_fn(|i| {
-            error_values[Diff::<Self::N, Self::KBytes>::USIZE + i].0
-                ^ codeword[Diff::<Self::N, Self::KBytes>::USIZE + i]
-        })
-    }
+impl<RS: ShortenedByteReedSolomonParam> ShortenedByteReedSolomon for RS {
+    type ParityCheckBytesize = Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>;
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -369,7 +395,7 @@ impl<N: ArraySize + NonZero> RsPolynomial<N> {
         let mut v = *point;
 
         let mut res = self.coeffs[0];
-        for j in 1..<N as Unsigned>::USIZE {
+        for j in 1..N::USIZE {
             res += v * self.coeffs[j];
             v *= *point;
         }
@@ -426,8 +452,9 @@ impl<N: ArraySize + NonZero> MulAssign<Gf256> for RsPolynomial<N> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::utils::XofState;
-    use hybrid_array::sizes::{U2, U8};
+    use crate::hash::XofState;
+    use hybrid_array::sizes::U2;
+    use rand::RngExt;
     use rand::distr::{Distribution, StandardUniform};
     use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -437,19 +464,25 @@ mod test {
         }
     }
 
-    fn test_zero_syndrome<RS: ShortenedByteReedSolomonParam>(codeword: Array<u8, RS::N>) {
+    fn test_zero_syndrome<RS: ShortenedByteReedSolomonParam>(
+        codeword: Array<u8, RS::ExternalCodewordBytesize>,
+    ) {
         assert_eq!(RS::compute_syndromes(&codeword), Array::default());
     }
 
-    fn test_nonzero_syndrome<RS: ShortenedByteReedSolomonParam>(codeword: Array<u8, RS::N>) {
+    fn test_nonzero_syndrome<RS: ShortenedByteReedSolomonParam>(
+        codeword: Array<u8, RS::ExternalCodewordBytesize>,
+    ) {
         assert_ne!(RS::compute_syndromes(&codeword), Array::default());
     }
 
-    fn gen_noise<RS: ShortenedByteReedSolomonParam>(rng: &mut StdRng) -> RsPolynomial<RS::N> {
+    fn gen_noise<RS: ShortenedByteReedSolomonParam>(
+        rng: &mut StdRng,
+    ) -> Array<u8, RS::ExternalCodewordBytesize> {
         let seed: [u8; 8] = rng.random();
         let mut xof = XofState::new(&seed);
         let support: Array<usize, _> =
-            xof.generate_random_support_biased::<Quot<Diff<RS::N, RS::K>, U2>, RS::N>();
+            xof.generate_random_support_biased::<Quot<Diff<RS::ExternalCodewordBytesize, RS::ExternalMessageBytesize>, U2>, RS::ExternalCodewordBytesize>();
 
         let mut res = Array::default();
         for v in support {
@@ -464,15 +497,16 @@ mod test {
         for _ in 0..100 {
             let message = Array::from_fn(|_| rng.random());
 
-            test_zero_syndrome::<RS>(RS::encode_bytes(&message));
+            test_zero_syndrome::<RS>(RS::encode_external(&message));
         }
 
         for _ in 0..100 {
             let message = Array::from_fn(|_| rng.random());
 
-            let codeword = RS::encode_bytes(&message);
+            let codeword = RS::encode_external(&message);
 
-            let noisy_codeword = RsPolynomial::<RS::N>::from(codeword) + gen_noise::<RS>(&mut rng);
+            let noisy_codeword = RsPolynomial::<RS::ExternalCodewordBytesize>::from(codeword)
+                + gen_noise::<RS>(&mut rng).into();
 
             test_nonzero_syndrome::<RS>(noisy_codeword.into());
         }
@@ -484,7 +518,7 @@ mod test {
             202, 48, 44, 62, 103, 240, 103, 102, 145, 190, 93, 206, 31, 140, 78, 229,
         ]);
 
-        let codeword = HQC1ReedSolomon::encode_bytes(&message);
+        let codeword = Hqc1::encode_external(&message);
         let expected = Array([
             239, 195, 82, 1, 191, 86, 194, 73, 235, 59, 99, 202, 210, 230, 140, 79, 62, 75, 6, 172,
             69, 61, 63, 183, 36, 148, 132, 253, 192, 225, 202, 48, 44, 62, 103, 240, 103, 102, 145,
@@ -501,7 +535,7 @@ mod test {
             52, 201, 195, 54, 40, 167,
         ]);
 
-        let codeword = HQC3ReedSolomon::encode_bytes(&message);
+        let codeword = Hqc3::encode_external(&message);
         let expected = Array([
             44, 201, 215, 222, 4, 2, 190, 88, 93, 152, 240, 155, 168, 68, 8, 215, 144, 93, 24, 251,
             90, 214, 184, 242, 160, 152, 248, 59, 193, 106, 117, 53, 198, 223, 10, 99, 149, 248,
@@ -518,7 +552,7 @@ mod test {
             164, 107, 51, 154, 159, 40, 179, 60, 118, 179, 23, 58,
         ]);
 
-        let codeword = HQC5ReedSolomon::encode_bytes(&message);
+        let codeword = Hqc5::encode_external(&message);
         let expected = Array([
             48, 33, 138, 215, 50, 132, 243, 36, 37, 159, 94, 128, 12, 120, 255, 158, 130, 216, 173,
             229, 204, 104, 43, 49, 58, 174, 255, 29, 146, 108, 221, 76, 213, 58, 79, 170, 248, 189,
@@ -537,7 +571,7 @@ mod test {
             91, 227, 140, 239, 128, 59, 20, 84, 179, 59, 210, 4, 199, 20, 34, 187, 70, 5, 64, 163,
             117, 134, 69, 121, 215, 46,
         ]);
-        test_zero_syndrome::<HQC1ReedSolomon>(codeword);
+        test_zero_syndrome::<Hqc1>(codeword);
     }
 
     #[test]
@@ -547,7 +581,7 @@ mod test {
             90, 214, 184, 242, 160, 152, 248, 59, 193, 106, 117, 53, 198, 223, 10, 99, 149, 248,
             255, 192, 149, 203, 211, 187, 15, 245, 106, 82, 183, 76, 52, 201, 195, 54, 40, 167,
         ]);
-        test_zero_syndrome::<HQC3ReedSolomon>(codeword);
+        test_zero_syndrome::<Hqc3>(codeword);
     }
 
     #[test]
@@ -559,22 +593,22 @@ mod test {
             69, 210, 4, 199, 20, 34, 187, 70, 5, 64, 163, 117, 134, 69, 121, 215, 46, 115, 15, 30,
             127, 164, 107, 51, 154, 159, 40, 179, 60, 118, 179, 23, 58,
         ]);
-        test_zero_syndrome::<HQC5ReedSolomon>(codeword);
+        test_zero_syndrome::<Hqc5>(codeword);
     }
 
     #[test]
     fn test_encoding_and_syndromes_hqc1rs() {
-        test_encoding_and_syndromes::<HQC1ReedSolomon>(1337);
+        test_encoding_and_syndromes::<Hqc1>(1337);
     }
 
     #[test]
     fn test_encoding_and_syndromes_hqc3rs() {
-        test_encoding_and_syndromes::<HQC3ReedSolomon>(1338);
+        test_encoding_and_syndromes::<Hqc3>(1338);
     }
 
     #[test]
     fn test_encoding_and_syndromes_hqc5rs() {
-        test_encoding_and_syndromes::<HQC5ReedSolomon>(1339);
+        test_encoding_and_syndromes::<Hqc5>(1339);
     }
 
     fn test_elp<RS: ShortenedByteReedSolomonParam>(seed: u64) {
@@ -583,7 +617,7 @@ mod test {
         for _ in 0..100 {
             let noise = gen_noise::<RS>(&mut rng);
 
-            let syndromes = RS::compute_syndromes(&noise.clone().into());
+            let syndromes = RS::compute_syndromes(&noise);
 
             let (error_locator_polynomial, _) = RS::compute_elp(&syndromes);
 
@@ -592,11 +626,11 @@ mod test {
             // And also check that the converse is also true.
             //
             // Check that
-            for i in 0..RS::N::USIZE {
+            for i in 0..RS::ExternalCodewordBytesize::USIZE {
                 assert!(i < 256);
                 let pos = Gf256(2).pow(i as u8);
 
-                if noise.coeffs[i] != Gf256(0) {
+                if noise[i] != 0 {
                     assert_eq!(error_locator_polynomial.evaluate(&pos.inv()), Gf256(0));
                 } else {
                     assert_ne!(error_locator_polynomial.evaluate(&pos.inv()), Gf256(0));
@@ -607,17 +641,17 @@ mod test {
 
     #[test]
     fn test_elp_hqc1rs() {
-        test_elp::<HQC1ReedSolomon>(1337);
+        test_elp::<Hqc1>(1337);
     }
 
     #[test]
     fn test_elp_hqc3rs() {
-        test_elp::<HQC3ReedSolomon>(1338);
+        test_elp::<Hqc3>(1338);
     }
 
     #[test]
     fn test_elp_hqc5rs() {
-        test_elp::<HQC5ReedSolomon>(1339);
+        test_elp::<Hqc5>(1339);
     }
 
     fn test_error_positions<RS: ShortenedByteReedSolomonParam>(seed: u64) {
@@ -626,7 +660,7 @@ mod test {
         for _ in 0..100 {
             let noise = gen_noise::<RS>(&mut rng);
 
-            let syndromes = RS::compute_syndromes(&noise.clone().into());
+            let syndromes = RS::compute_syndromes(&noise);
 
             let (error_locator_polynomial, _) = RS::compute_elp(&syndromes);
             let error_positions = RS::compute_error_positions(&error_locator_polynomial);
@@ -636,9 +670,9 @@ mod test {
                 let beta = Gf256(2).pow(i as u8);
 
                 if v.into_option().is_none() {
-                    assert_eq!(noise.coeffs[i], Gf256(0));
+                    assert_eq!(noise[i], 0);
                 } else {
-                    assert_ne!(noise.coeffs[i], Gf256(0));
+                    assert_ne!(noise[i], 0);
                     assert_eq!(*v.as_inner_unchecked(), beta);
                 }
             }
@@ -647,17 +681,17 @@ mod test {
 
     #[test]
     fn test_error_positions_hqc1rs() {
-        test_error_positions::<HQC1ReedSolomon>(1337);
+        test_error_positions::<Hqc1>(1337);
     }
 
     #[test]
     fn test_error_positions_hqc3rs() {
-        test_error_positions::<HQC3ReedSolomon>(1338);
+        test_error_positions::<Hqc3>(1338);
     }
 
     #[test]
     fn test_error_positions_hqc5rs() {
-        test_error_positions::<HQC5ReedSolomon>(1339);
+        test_error_positions::<Hqc5>(1339);
     }
 
     fn test_error_values<RS: ShortenedByteReedSolomonParam>(seed: u64) {
@@ -666,7 +700,7 @@ mod test {
         for _ in 0..100 {
             let noise = gen_noise::<RS>(&mut rng);
 
-            let syndromes = RS::compute_syndromes(&noise.clone().into());
+            let syndromes = RS::compute_syndromes(&noise);
 
             let (error_locator_polynomial, n_errors) = RS::compute_elp(&syndromes);
             let error_positions = RS::compute_error_positions(&error_locator_polynomial);
@@ -675,78 +709,81 @@ mod test {
 
             let error_values = RS::compute_error_values(error_positions, z);
 
-            for (v1, v2) in error_values.into_iter().zip(noise.coeffs.into_iter()) {
-                assert_eq!(v1, v2);
+            for (v1, v2) in error_values.into_iter().zip(noise) {
+                assert_eq!(v1, Gf256(v2));
             }
         }
     }
 
     #[test]
     fn test_error_values_hqc1rs() {
-        test_error_values::<HQC1ReedSolomon>(1340);
+        test_error_values::<Hqc1>(1340);
     }
 
     #[test]
     fn test_error_values_hqc3rs() {
-        test_error_values::<HQC3ReedSolomon>(1341);
+        test_error_values::<Hqc3>(1341);
     }
 
     #[test]
     fn test_error_values_hqc5rs() {
-        test_error_values::<HQC5ReedSolomon>(1342);
+        test_error_values::<Hqc5>(1342);
     }
 
     fn test_perfect<RS: ShortenedByteReedSolomonParam>(seed: u64) {
         let mut rng = StdRng::seed_from_u64(seed);
 
         for _ in 0..100 {
-            let message = Array::<u8, RS::K>::from_fn(|_| rng.random());
+            let message = Array::<u8, RS::ExternalMessageBytesize>::from_fn(|_| rng.random());
 
-            assert_eq!(message, RS::decode_to_bytes(&RS::encode_bytes(&(message))));
+            assert_eq!(
+                message,
+                RS::decode_external(&RS::encode_external(&(message)))
+            );
         }
     }
 
     #[test]
     fn test_perfect_hqc1rs() {
-        test_perfect::<HQC1ReedSolomon>(1312);
+        test_perfect::<Hqc1>(1312);
     }
 
     #[test]
     fn test_perfect_hqc3rs() {
-        test_perfect::<HQC3ReedSolomon>(1341);
+        test_perfect::<Hqc3>(1341);
     }
 
     #[test]
     fn test_perfect_hqc5rs() {
-        test_perfect::<HQC5ReedSolomon>(1342);
+        test_perfect::<Hqc5>(1342);
     }
 
     fn test_noisy<RS: ShortenedByteReedSolomonParam>(seed: u64) {
         let mut rng = StdRng::seed_from_u64(seed);
 
         for _ in 0..100 {
-            let message = Array::<u8, RS::K>::from_fn(|_| rng.random());
+            let message = Array::<u8, RS::ExternalMessageBytesize>::from_fn(|_| rng.random());
             let noise = gen_noise::<RS>(&mut rng);
 
-            let codeword = &RS::encode_bytes(&(message));
-            let noisy_codeword = Array::from_fn(|i| codeword[i] ^ noise.coeffs[i].0);
+            let codeword = &RS::encode_external(&(message));
+            let noisy_codeword = Array::from_fn(|i| codeword[i] ^ noise[i]);
 
-            assert_eq!(message, RS::decode_to_bytes(&noisy_codeword));
+            assert_eq!(message, RS::decode_external(&noisy_codeword));
         }
     }
 
     #[test]
     fn test_noisy_hqc1rs() {
-        test_noisy::<HQC1ReedSolomon>(1313);
+        test_noisy::<Hqc1>(1313);
     }
 
     #[test]
     fn test_noisy_hqc3rs() {
-        test_noisy::<HQC3ReedSolomon>(1342);
+        test_noisy::<Hqc3>(1342);
     }
 
     #[test]
     fn test_noisy_hqc5rs() {
-        test_noisy::<HQC5ReedSolomon>(1343);
+        test_noisy::<Hqc5>(1343);
     }
 }

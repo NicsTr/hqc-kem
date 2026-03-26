@@ -1,28 +1,24 @@
-use core::ops::{Add, Div, Mul, Sub};
+use core::ops::{Add, Mul};
 
+use ctutils::CtEq;
 use hybrid_array::{
     Array, ArraySize,
-    sizes::{U1, U64},
-    typenum::{Diff, Quot, Sum, Unsigned},
+    sizes::{U8, U64},
+    typenum::Unsigned,
 };
+
 use zerocopy::IntoBytes;
+
+use crate::size_traits::{Bytesize, Octobytesize, WordsizeFromBitsize};
 
 /// Packed binary polynomial
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BinaryPolynomial<NBits>(Array<u64, Sum<Quot<Diff<NBits, U1>, U64>, U1>>)
-where
-    NBits: Sub<U1> + Unsigned,
-    Diff<NBits, U1>: Div<U64>,
-    Quot<Diff<NBits, U1>, U64>: Add<U1>,
-    Sum<Quot<Diff<NBits, U1>, U64>, U1>: ArraySize;
+#[repr(transparent)]
+pub(crate) struct BinaryPolynomial<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>>(
+    Array<u64, Octobytesize<NBits>>,
+);
 
-impl<NBits> BinaryPolynomial<NBits>
-where
-    NBits: Sub<U1> + Unsigned,
-    Diff<NBits, U1>: Div<U64>,
-    Quot<Diff<NBits, U1>, U64>: Add<U1>,
-    Sum<Quot<Diff<NBits, U1>, U64>, U1>: ArraySize,
-{
+impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>> BinaryPolynomial<NBits> {
     pub(crate) fn zero() -> Self {
         Array::default().into()
     }
@@ -36,43 +32,83 @@ where
     /// Return a reference to a slice of exactly `NBytes` bytes into this polynomial.
     ///
     /// This should avoid any copy.
-    pub(crate) fn as_bytes_truncated<NBytes: ArraySize + Unsigned>(&self) -> &[u8] {
+    pub(crate) fn as_bytes_truncated<NBytes: ArraySize>(&self) -> &[u8] {
         const { assert!(NBytes::USIZE * 8 < NBits::USIZE) }
         &self.0.as_bytes()[..NBytes::USIZE]
     }
 }
 
-impl<NBits> From<Array<u64, Sum<Quot<Diff<NBits, U1>, U64>, U1>>> for BinaryPolynomial<NBits>
-where
-    NBits: Sub<U1> + Unsigned,
-    Diff<NBits, U1>: Div<U64>,
-    Quot<Diff<NBits, U1>, U64>: Add<U1>,
-    Sum<Quot<Diff<NBits, U1>, U64>, U1>: ArraySize,
+impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>> From<&Array<u8, Bytesize<NBits>>>
+    for BinaryPolynomial<NBits>
 {
-    fn from(value: Array<u64, Sum<Quot<Diff<NBits, U1>, U64>, U1>>) -> Self {
+    fn from(value: &Array<u8, Bytesize<NBits>>) -> Self {
+        const {
+            assert!(Bytesize::<NBits>::USIZE <= 8 * Octobytesize::<NBits>::USIZE);
+            assert!(Bytesize::<NBits>::USIZE > 8 * (Octobytesize::<NBits>::USIZE - 1));
+        }
+
+        let mut res = Array::default();
+        let mut chunk_iter = value.chunks_exact(size_of::<u64>());
+        for (a, b) in res.iter_mut().zip(&mut chunk_iter) {
+            // Cannot fail with the use of chunks_exact
+            *a = u64::from_le_bytes(b.try_into().unwrap());
+        }
+
+        let remainder = chunk_iter.remainder();
+        let mut last_word = [0u8; size_of::<u64>()];
+        // Cannot fail since remainder length is guaranteed to be strictly less than size_of::<u64>
+        last_word[..remainder.len()].copy_from_slice(remainder);
+
+        // Cannot fail since res is never empty
+        *res.last_mut().unwrap() = u64::from_le_bytes(last_word);
+
+        Self(res)
+    }
+}
+
+impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>> From<&BinaryPolynomial<NBits>>
+    for Array<u8, Bytesize<NBits>>
+{
+    fn from(value: &BinaryPolynomial<NBits>) -> Self {
+        const {
+            assert!(Bytesize::<NBits>::USIZE <= 8 * Octobytesize::<NBits>::USIZE);
+            assert!(Bytesize::<NBits>::USIZE > 8 * (Octobytesize::<NBits>::USIZE - 1));
+            assert!(size_of::<BinaryPolynomial<NBits>>() != 0)
+        }
+
+        let mut res = Array::default();
+        let mut chunk_iter = res.chunks_exact_mut(size_of::<u64>());
+        for (a, b) in (&mut chunk_iter).zip(value.0.iter()) {
+            // Cannot fail since chunk is of exactly the right size
+            a.copy_from_slice(&b.to_le_bytes());
+        }
+
+        let remainder = chunk_iter.into_remainder();
+
+        // Cannot fail since value is never empty and slice sizes are equals
+        remainder.copy_from_slice(&value.0.last().unwrap().to_le_bytes()[..remainder.len()]);
+
+        res
+    }
+}
+
+impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>>
+    From<Array<u64, Octobytesize<NBits>>> for BinaryPolynomial<NBits>
+{
+    fn from(value: Array<u64, Octobytesize<NBits>>) -> Self {
         BinaryPolynomial(value)
     }
 }
 
-impl<NBits> From<BinaryPolynomial<NBits>> for Array<u64, Sum<Quot<Diff<NBits, U1>, U64>, U1>>
-where
-    NBits: Sub<U1> + Unsigned,
-    Diff<NBits, U1>: Div<U64>,
-    Quot<Diff<NBits, U1>, U64>: Add<U1>,
-    Sum<Quot<Diff<NBits, U1>, U64>, U1>: ArraySize,
+impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>> From<BinaryPolynomial<NBits>>
+    for Array<u64, Octobytesize<NBits>>
 {
     fn from(value: BinaryPolynomial<NBits>) -> Self {
         value.0
     }
 }
 
-impl<NBits> Add for BinaryPolynomial<NBits>
-where
-    NBits: Sub<U1> + Unsigned,
-    Diff<NBits, U1>: Div<U64>,
-    Quot<Diff<NBits, U1>, U64>: Add<U1>,
-    Sum<Quot<Diff<NBits, U1>, U64>, U1>: ArraySize,
-{
+impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>> Add for BinaryPolynomial<NBits> {
     type Output = BinaryPolynomial<NBits>;
 
     fn add(self, rhs: Self) -> Self::Output {
@@ -80,12 +116,8 @@ where
     }
 }
 
-impl<NBits> Mul<&Self> for BinaryPolynomial<NBits>
-where
-    NBits: Sub<U1> + Unsigned,
-    Diff<NBits, U1>: Div<U64>,
-    Quot<Diff<NBits, U1>, U64>: Add<U1>,
-    Sum<Quot<Diff<NBits, U1>, U64>, U1>: ArraySize,
+impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>> Mul<&Self>
+    for BinaryPolynomial<NBits>
 {
     type Output = BinaryPolynomial<NBits>;
 
@@ -109,9 +141,15 @@ where
     }
 }
 
+impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>> CtEq for BinaryPolynomial<NBits> {
+    fn ct_eq(&self, other: &Self) -> ctutils::Choice {
+        self.0.ct_eq(&other.0)
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use crate::{polynomial::BinaryPolynomial, utils::XofState};
+    use crate::{hash::XofState, polynomial::BinaryPolynomial};
     use hybrid_array::{
         Array,
         sizes::{U2, U5, U127, U1040, U2048},
@@ -179,4 +217,6 @@ mod test {
             );
         }
     }
+
+    // TODO: test from + into array of bytes
 }

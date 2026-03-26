@@ -1,43 +1,69 @@
-use core::ops::{Add, Div, Sub};
+use core::fmt::Debug;
+use core::ops::Add;
 
+use ctutils::{Choice, CtEq};
 use hybrid_array::{
-    ArraySize,
-    sizes::{U1, U64, U66, U75, U100, U114, U131, U149, U17669, U35851, U57637},
-    typenum::{Diff, Quot, Sum, Unsigned},
+    Array, ArraySize,
+    sizes::{U8, U16, U32, U64, U66, U75, U100, U114, U131, U149, U17669, U35851, U57637},
+    typenum::{Sum, Unsigned},
 };
+use kem::KeySizeUser;
 use zerocopy::IntoBytes;
 
 use crate::{
-    code::{Code, HQC1Code},
+    Hqc1, Hqc3, Hqc5,
+    code::{Code, CodeParams},
+    hash::{XofState, hash_i},
     polynomial::BinaryPolynomial,
-    utils::{XofState, hash_i},
+    size_traits::{Bytesize, WordsizeFromBitsize},
 };
 
-pub(crate) struct PkeEncryptionKey<P: Pke> {
-    ek_seed: [u8; 32],
-    s: BinaryPolynomial<P::NBits>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub(crate) struct EncryptionKey<P: PkeParams> {
+    pub(crate) ek_seed: [u8; 32],
+    pub(crate) s: BinaryPolynomial<P::NBits>,
 }
 
-pub(crate) struct PkeDecryptionKey([u8; 32]);
-
-pub(crate) struct PkeCiphertext<P: Pke> {
-    u: BinaryPolynomial<P::NBits>,
-    v: <P::HqcCode as Code>::Codeword,
+impl<P: PkeParams> KeySizeUser for EncryptionKey<P> {
+    type KeySize = Sum<Bytesize<P::NBits>, U32>;
 }
 
-pub(crate) trait Pke: Sized
-where
-    Self::NBits: Sub<U1> + Unsigned,
-    Diff<Self::NBits, U1>: Div<U64>,
-    Quot<Diff<Self::NBits, U1>, U64>: Add<U1>,
-    Sum<Quot<Diff<Self::NBits, U1>, U64>, U1>: ArraySize,
-{
-    type NBits: Unsigned;
-    type W: ArraySize;
-    type We: ArraySize;
-    type HqcCode: Code;
+impl<P: PkeParams> EncryptionKey<P> {
+    pub(crate) fn encrypt(
+        &self,
+        message: &Array<u8, P::ExternalMessageBytesize>,
+        theta: &[u8; 32],
+    ) -> Ciphertext<P> {
+        let mut xof_h = XofState::new(&self.ek_seed);
+        let h = xof_h.sample_vect();
 
-    fn keygen(seed: [u8; 32]) -> (PkeEncryptionKey<Self>, PkeDecryptionKey) {
+        let mut xof_encrypt = XofState::new(theta);
+        let r2 = xof_encrypt.sample_fixed_weight_vect_biased::<P::We, P::NBits>();
+        let e = xof_encrypt.sample_fixed_weight_vect_biased::<P::We, P::NBits>();
+        let r1 = xof_encrypt.sample_fixed_weight_vect_biased::<P::We, P::NBits>();
+
+        let u = r1 + h * &r2;
+        let mut v = <P as Code>::encode(message);
+
+        let mask = r2 * &self.s + e;
+
+        for (vi, mi) in v
+            .as_mut_bytes()
+            .iter_mut()
+            .zip(mask.as_bytes_truncated::<<P as CodeParams>::CodewordBytesize>())
+        {
+            *vi ^= mi;
+        }
+
+        Ciphertext { u, v }
+    }
+}
+
+pub(crate) struct DecryptionKey([u8; 32]);
+
+impl DecryptionKey {
+    pub(crate) fn keygen<P: PkeParams>(seed: [u8; 32]) -> (EncryptionKey<P>, Self) {
         // Generate encryption and decryption seeds
         let expanded_seed: [u8; 64] = hash_i(&seed);
         let dk_seed: [u8; 32] = expanded_seed[..32]
@@ -49,134 +75,155 @@ where
 
         // Generate decryption key
         let mut xof_x_y = XofState::new(&dk_seed);
-        let y = xof_x_y.sample_fixed_weight_vect_rejection::<Self::W, Self::NBits>();
-        let x = xof_x_y.sample_fixed_weight_vect_rejection::<Self::W, Self::NBits>();
+        let y = xof_x_y.sample_fixed_weight_vect_rejection::<P::W, P::NBits>();
+        let x = xof_x_y.sample_fixed_weight_vect_rejection::<P::W, P::NBits>();
 
         // Generate encryption key
         let mut xof_h = XofState::new(&ek_seed);
         let h = xof_h.sample_vect();
         let s = x + h * &y;
 
-        (PkeEncryptionKey { ek_seed, s }, PkeDecryptionKey(dk_seed))
+        (EncryptionKey { ek_seed, s }, Self(dk_seed))
     }
 
-    fn encrypt(
-        ek: PkeEncryptionKey<Self>,
-        message: <Self::HqcCode as Code>::Message,
-        theta: [u8; 32],
-    ) -> PkeCiphertext<Self> {
-        let mut xof_h = XofState::new(&ek.ek_seed);
-        let h = xof_h.sample_vect();
+    pub(crate) fn decrypt<P: PkeParams>(
+        &self,
+        ciphertext: &Ciphertext<P>,
+    ) -> Array<u8, P::ExternalMessageBytesize> {
+        let mut xof_x_y = XofState::new(&self.0);
+        let y = xof_x_y.sample_fixed_weight_vect_rejection::<P::W, P::NBits>();
 
-        let mut xof_encrypt = XofState::new(&theta);
-        let r2 = xof_encrypt.sample_fixed_weight_vect_biased::<Self::We, Self::NBits>();
-        let e = xof_encrypt.sample_fixed_weight_vect_biased::<Self::We, Self::NBits>();
-        let r1 = xof_encrypt.sample_fixed_weight_vect_biased::<Self::We, Self::NBits>();
+        let demask = y * &ciphertext.u;
 
-        let u = r1 + h * &r2;
-        let mut v = Self::HqcCode::encode_once(&message);
-
-        let mask = ek.s * &r2 + e;
+        let mut v = ciphertext.v.clone();
 
         for (vi, mi) in v
             .as_mut_bytes()
             .iter_mut()
-            .zip(mask.as_bytes_truncated::<<Self::HqcCode as Code>::NBytes>())
+            .zip(demask.as_bytes_truncated::<<P as CodeParams>::CodewordBytesize>())
         {
             *vi ^= mi;
         }
 
-        // todo!("tests");
-        PkeCiphertext { u, v }
-    }
-
-    fn decrypt(
-        dk: PkeDecryptionKey,
-        ciphertext: PkeCiphertext<Self>,
-    ) -> <Self::HqcCode as Code>::Message {
-        let mut xof_x_y = XofState::new(&dk.0);
-        let y = xof_x_y.sample_fixed_weight_vect_rejection::<Self::W, Self::NBits>();
-
-        let demask = ciphertext.u * &y;
-
-        let mut v = ciphertext.v;
-
-        for (vi, mi) in v
-            .as_mut_bytes()
-            .iter_mut()
-            .zip(demask.as_bytes_truncated::<<Self::HqcCode as Code>::NBytes>())
-        {
-            *vi ^= mi;
-        }
-
-        // todo!("tests");
-        Self::HqcCode::decode_once(&v)
+        P::decode(&v)
     }
 }
 
-impl<P: Pke> PkeEncryptionKey<P> {}
+pub(crate) struct Ciphertext<P: PkeParams> {
+    u: BinaryPolynomial<P::NBits>,
+    v: Array<u8, <P as CodeParams>::CodewordBytesize>,
+}
 
-pub(crate) struct HQC1Pke;
-pub(crate) struct HQC3Pke;
-pub(crate) struct HQC5Pke;
+impl<P: PkeParams> From<&Ciphertext<P>>
+    for Array<u8, Sum<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>>
+{
+    fn from(value: &Ciphertext<P>) -> Self {
+        //TODO: add const assert
+        let mut res = Array::default();
+        let u_bytes: Array<u8, _> = (&value.u).into();
 
-impl Pke for HQC1Pke {
+        res[..Bytesize::<P::NBits>::USIZE].copy_from_slice(&u_bytes);
+        res[Bytesize::<P::NBits>::USIZE..].copy_from_slice(value.v.as_bytes());
+        res
+    }
+}
+
+impl<P: PkeParams> From<&Array<u8, Sum<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>>>
+    for Ciphertext<P>
+{
+    fn from(
+        value: &Array<u8, Sum<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>>,
+    ) -> Self {
+        //TODO: add const assert
+        // Cannot fail since sizes are right by definition of type
+        let u_bytes: Array<u8, _> = value[..Bytesize::<P::NBits>::USIZE].try_into().unwrap();
+        let v_bytes: Array<u8, _> = value[Bytesize::<P::NBits>::USIZE..].try_into().unwrap();
+
+        // TODO: zerocopy for v
+        // let v = <P::HqcCode as Code>::Codeword::read_from_bytes(&value[Bytesize::<P::NBits>::USIZE..]).unwrap();
+
+        Self {
+            u: (&u_bytes).into(),
+            v: v_bytes,
+        }
+    }
+}
+
+impl<P: PkeParams> CtEq for Ciphertext<P> {
+    fn ct_eq(&self, other: &Self) -> Choice {
+        self.u.ct_eq(&other.u) & self.v.ct_eq(&other.v)
+    }
+}
+
+pub trait PkeParams:
+    CodeParams + Sized + PartialEq + Eq + Debug + Ord + Default + Copy + Send + Sync + 'static
+where
+    Bytesize<Self::NBits>: Add<U32> + Add<<Self as CodeParams>::CodewordBytesize>,
+    Sum<Bytesize<Self::NBits>, U32>: ArraySize,
+    Sum<Bytesize<Self::NBits>, <Self as CodeParams>::CodewordBytesize>: ArraySize + Add<U16>,
+    Sum<Sum<Bytesize<Self::NBits>, <Self as CodeParams>::CodewordBytesize>, U16>: ArraySize,
+{
+    type NBits: PartialEq + Eq + Debug + WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>;
+    type W: ArraySize;
+    type We: ArraySize;
+}
+
+impl PkeParams for Hqc1 {
     type NBits = U17669;
     type W = U66;
     type We = U75;
-    type HqcCode = HQC1Code;
 }
 
-impl Pke for HQC3Pke {
+impl PkeParams for Hqc3 {
     type NBits = U35851;
     type W = U100;
     type We = U114;
-    type HqcCode = HQC1Code;
 }
 
-impl Pke for HQC5Pke {
+impl PkeParams for Hqc5 {
     type NBits = U57637;
     type W = U131;
     type We = U149;
-    type HqcCode = HQC1Code;
 }
 
 #[cfg(test)]
 mod test {
     use hybrid_array::Array;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
     use zerocopy::IntoBytes;
 
-    use crate::{
-        code::Code,
-        pke::{HQC1Pke, HQC3Pke, HQC5Pke, Pke},
-    };
+    use crate::pke::{DecryptionKey, Hqc1, Hqc3, Hqc5, PkeParams};
 
-    fn test_encrypt_decrypt<P: Pke>(seed: u64) {
+    fn test_encrypt_decrypt<P: PkeParams>(seed: u64) {
         let mut rng = StdRng::seed_from_u64(seed);
         let seed: [u8; 32] = rng.random();
         let theta: [u8; 32] = rng.random();
 
-        let (ek, dk) = P::keygen(seed);
-        let msg_raw = Array::<u8, <P::HqcCode as Code>::KBytes>::default();
-        let c = P::encrypt(ek, msg_raw.clone().into(), theta);
+        let (ek, dk) = DecryptionKey::keygen::<P>(seed);
+        let msg_raw = Array::<u8, P::ExternalMessageBytesize>::default();
+        let c = ek.encrypt(&msg_raw.clone().into(), &theta);
 
-        let msg_decrypted = P::decrypt(dk, c);
+        let msg_decrypted = dk.decrypt(&c);
         assert_eq!(msg_raw.as_bytes(), msg_decrypted.as_bytes());
     }
 
     #[test]
     fn test_encrypt_decrypt_hqc1() {
-        test_encrypt_decrypt::<HQC1Pke>(1337);
+        test_encrypt_decrypt::<Hqc1>(1337);
     }
 
     #[test]
     fn test_encrypt_decrypt_hqc3() {
-        test_encrypt_decrypt::<HQC3Pke>(1338);
+        test_encrypt_decrypt::<Hqc3>(1338);
     }
 
     #[test]
     fn test_encrypt_decrypt_hqc5() {
-        test_encrypt_decrypt::<HQC5Pke>(1339);
+        test_encrypt_decrypt::<Hqc5>(1339);
+    }
+
+    #[test]
+    fn standard_test_vectors() {
+        todo!();
     }
 }
