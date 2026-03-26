@@ -60,6 +60,7 @@ impl From<Gf256> for u8 {
     }
 }
 
+#[allow(clippy::suspicious_arithmetic_impl)]
 impl Add<Self> for Gf256 {
     type Output = Self;
 
@@ -68,6 +69,7 @@ impl Add<Self> for Gf256 {
     }
 }
 
+#[allow(clippy::suspicious_op_assign_impl)]
 impl AddAssign for Gf256 {
     fn add_assign(&mut self, rhs: Self) {
         self.0 ^= rhs.0

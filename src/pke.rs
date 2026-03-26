@@ -139,9 +139,6 @@ impl<P: PkeParams> From<&Array<u8, Sum<Bytesize<P::NBits>, <P as CodeParams>::Co
         let u_bytes: Array<u8, _> = value[..Bytesize::<P::NBits>::USIZE].try_into().unwrap();
         let v_bytes: Array<u8, _> = value[Bytesize::<P::NBits>::USIZE..].try_into().unwrap();
 
-        // TODO: zerocopy for v
-        // let v = <P::HqcCode as Code>::Codeword::read_from_bytes(&value[Bytesize::<P::NBits>::USIZE..]).unwrap();
-
         Self {
             u: (&u_bytes).into(),
             v: v_bytes,

@@ -138,6 +138,19 @@ impl CtEqZero for u8 {
     }
 }
 
+type ConcreteRsPolynomial<Param> = RsPolynomial<
+    Sum<
+        Quot<
+            Diff<
+                <Param as ShortenedByteReedSolomonParam>::ExternalCodewordBytesize,
+                <Param as ShortenedByteReedSolomonParam>::ExternalMessageBytesize,
+            >,
+            U2,
+        >,
+        U1,
+    >,
+>;
+
 pub(crate) trait ShortenedByteReedSolomon: ShortenedByteReedSolomonParam {
     type ParityCheckBytesize: ArraySize;
 
@@ -180,12 +193,7 @@ pub(crate) trait ShortenedByteReedSolomon: ShortenedByteReedSolomonParam {
             Gf256,
             Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>,
         >,
-    ) -> (
-        RsPolynomial<
-            Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>,
-        >,
-        u8,
-    ) {
+    ) -> (ConcreteRsPolynomial<Self>, u8) {
         // Start with initial values for mu = 0
         let mut x_sigma_p = RsPolynomial::x();
         let mut d_p = Gf256(1);
@@ -273,9 +281,7 @@ pub(crate) trait ShortenedByteReedSolomon: ShortenedByteReedSolomonParam {
     // Maybe Horner's method, Chien search, or FFT-based method
     // (like in the HQC reference implementation).
     fn compute_error_positions(
-        elp_poly: &RsPolynomial<
-            Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>,
-        >,
+        elp_poly: &ConcreteRsPolynomial<Self>,
     ) -> Array<CtOption<Gf256>, Self::ExternalCodewordBytesize> {
         let mut beta = Gf256(1);
         let mut beta_inv = Gf256(1);
@@ -296,17 +302,13 @@ pub(crate) trait ShortenedByteReedSolomon: ShortenedByteReedSolomonParam {
 
     /// Compute the "Z" polynomial from the error-locator polynomial and the syndromes.
     fn compute_z(
-        elp_poly: RsPolynomial<
-            Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>,
-        >,
+        elp_poly: ConcreteRsPolynomial<Self>,
         syndromes: Array<
             Gf256,
             Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>,
         >,
         n_errors: u8,
-    ) -> RsPolynomial<
-        Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>,
-    > {
+    ) -> ConcreteRsPolynomial<Self> {
         let mut z = elp_poly.clone();
 
         let max_correctable_error =
@@ -328,9 +330,7 @@ pub(crate) trait ShortenedByteReedSolomon: ShortenedByteReedSolomonParam {
     // TODO: compute only on the relevant values (the last N - K)
     fn compute_error_values(
         mut error_positions: Array<CtOption<Gf256>, Self::ExternalCodewordBytesize>,
-        z: RsPolynomial<
-            Sum<Quot<Diff<Self::ExternalCodewordBytesize, Self::ExternalMessageBytesize>, U2>, U1>,
-        >,
+        z: ConcreteRsPolynomial<Self>,
     ) -> Array<Gf256, Self::ExternalCodewordBytesize> {
         let mut beta_inv = Gf256(1);
         let inv_two = Gf256(2).inv(); // TODO: make it const
