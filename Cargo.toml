@@ -19,6 +19,7 @@ std = []
 
 [dev-dependencies]
 criterion = "0.7"
+hex = "0.4.3"
 
 [lib]
 bench = false

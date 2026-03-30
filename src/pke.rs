@@ -4,11 +4,11 @@ use core::ops::Add;
 use ctutils::{Choice, CtEq};
 use hybrid_array::{
     Array, ArraySize,
-    sizes::{U8, U16, U32, U64, U66, U75, U100, U114, U131, U149, U17669, U35851, U57637},
+    sizes::{U8, U16, U32, U64, U66, U75, U96, U100, U114, U131, U149, U17669, U35851, U57637},
     typenum::{Sum, Unsigned},
 };
 use kem::KeySizeUser;
-use zerocopy::IntoBytes;
+use zerocopy::{Immutable, IntoBytes};
 
 use crate::{
     Hqc1, Hqc3, Hqc5,
@@ -60,6 +60,8 @@ impl<P: PkeParams> EncryptionKey<P> {
     }
 }
 
+#[derive(IntoBytes, Immutable)]
+#[repr(transparent)]
 pub(crate) struct DecryptionKey([u8; 32]);
 
 impl DecryptionKey {
@@ -115,7 +117,7 @@ pub(crate) struct Ciphertext<P: PkeParams> {
 }
 
 impl<P: PkeParams> From<&Ciphertext<P>>
-    for Array<u8, Sum<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>>
+    for Array<u8, Sum<Bytesize<P::NBits>, P::CodewordBytesize>>
 {
     fn from(value: &Ciphertext<P>) -> Self {
         //TODO: add const assert
@@ -155,10 +157,12 @@ impl<P: PkeParams> CtEq for Ciphertext<P> {
 pub trait PkeParams:
     CodeParams + Sized + PartialEq + Eq + Debug + Ord + Default + Copy + Send + Sync + 'static
 where
-    Bytesize<Self::NBits>: Add<U32> + Add<<Self as CodeParams>::CodewordBytesize>,
-    Sum<Bytesize<Self::NBits>, U32>: ArraySize,
-    Sum<Bytesize<Self::NBits>, <Self as CodeParams>::CodewordBytesize>: ArraySize + Add<U16>,
-    Sum<Sum<Bytesize<Self::NBits>, <Self as CodeParams>::CodewordBytesize>, U16>: ArraySize,
+    Bytesize<Self::NBits>: Add<U32> + Add<Self::CodewordBytesize> + Add<U96>,
+    Sum<Bytesize<Self::NBits>, U32>: ArraySize, // Encryption/Encapsulation key
+    Sum<Bytesize<Self::NBits>, U96>: Add<Self::ExternalMessageBytesize>,
+    Sum<Sum<Bytesize<Self::NBits>, U96>, Self::ExternalMessageBytesize>: ArraySize, // Decapsulation key
+    Sum<Bytesize<Self::NBits>, Self::CodewordBytesize>: ArraySize + Add<U16>,
+    Sum<Sum<Bytesize<Self::NBits>, Self::CodewordBytesize>, U16>: ArraySize,
 {
     type NBits: PartialEq + Eq + Debug + WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>;
     type W: ArraySize;

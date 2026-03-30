@@ -145,9 +145,10 @@ impl XofState {
             // Bytes are fetched only three at a time, and used in big-endian.
             // To accomodate with `from_be_bytes()` needing an array of length 4,
             // the first byte of rand_bytes is never set.
-            self.get_bytes(&mut rand_bytes[1..]);
-            let candidate = u32::from_be_bytes(rand_bytes);
-            if candidate > rejection_threshold {
+            self.get_bytes(&mut rand_bytes[..3]);
+
+            let candidate = u32::from_le_bytes(rand_bytes);
+            if candidate >= rejection_threshold {
                 continue;
             }
 
@@ -199,6 +200,7 @@ impl XofState {
     ) -> BinaryPolynomial<NBits> {
         let mut res = BinaryPolynomial::zero();
 
+        // TODO: Do it while sampling the support, to minimize memory footprint.
         for v in self.generate_random_support_rejection::<W, NBits>() {
             res.set_coefficient(v);
         }
@@ -215,6 +217,7 @@ impl XofState {
     ) -> BinaryPolynomial<NBits> {
         let mut res = BinaryPolynomial::zero();
 
+        // TODO: Do it while sampling the support, to minimize memory footprint.
         for v in self.generate_random_support_biased::<W, NBits>() {
             res.set_coefficient(v);
         }

@@ -125,7 +125,7 @@ impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>> Mul<&Self>
     /// modulo X^N - 1.
     ///
     // TODO: This bitwise schoolbook multiplication should be optimized using
-    // fancy Karatsuba + Toom-Cook multiplication and architeecture dependent opitmizations
+    // fancy Karatsuba + Toom-Cook multiplication and architecture dependent opitmizations
     // (like pcmul or RISC-V's Zbc extension) as suggested by HQC specification.
     fn mul(self, rhs: &Self) -> Self::Output {
         let mut res = Array::default();

@@ -6,7 +6,7 @@ use hybrid_array::typenum::Sum;
 
 use hybrid_array::{
     Array, AssocArraySize,
-    sizes::{U16, U32},
+    sizes::{U16, U32, U96},
     typenum::Unsigned,
 };
 
@@ -15,6 +15,7 @@ use kem::{
     Seed, TryDecapsulate, TryKeyInit,
 };
 use rand::{CryptoRng, TryCryptoRng};
+use zerocopy::IntoBytes;
 
 use crate::code::CodeParams;
 use crate::hash::hash_j;
@@ -68,6 +69,7 @@ impl<P: PkeParams> From<&Ciphertext<P>>
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncapsulationKey<P: PkeParams>(EncryptionKey<P>);
 
+// TODO: impl KeySizeUser for DecapsulationKey
 impl<P: PkeParams> KeySizeUser for EncapsulationKey<P> {
     type KeySize = Sum<Bytesize<P::NBits>, U32>;
 }
@@ -110,11 +112,10 @@ impl<P: PkeParams> Encapsulate for EncapsulationKey<P> {
     where
         R: CryptoRng + ?Sized,
     {
-        let mut message_bytes = Array::<u8, P::ExternalMessageBytesize>::default();
+        let mut message = Array::<u8, P::ExternalMessageBytesize>::default();
         let mut salt = [0u8; 16];
-        rng.fill_bytes(&mut message_bytes);
+        rng.fill_bytes(&mut message);
         rng.fill_bytes(&mut salt);
-        let message = message_bytes;
 
         let g = hash_g::<P>(&hash_h::<Self::Kem>(self), &message, &salt);
 
@@ -182,6 +183,36 @@ impl<P: PkeParams> Generate for DecapsulationKey<P> {
         rng.try_fill_bytes(&mut seed)?;
         let (decapsulation_key, _) = HqcKem::<P>::from_seed(&seed.into());
         Ok(decapsulation_key)
+    }
+}
+
+impl<P: PkeParams> KeySizeUser for DecapsulationKey<P> {
+    type KeySize = Sum<Sum<Bytesize<P::NBits>, U96>, P::ExternalMessageBytesize>;
+}
+
+impl<P: PkeParams> KeyExport for DecapsulationKey<P> {
+    fn to_bytes(&self) -> Key<Self> {
+        const {
+            assert!(
+                <Key<Self> as AssocArraySize>::Size::USIZE
+                    == <kem::EncapsulationKey<<Self as Decapsulator>::Kem> as KeySizeUser>::KeySize::USIZE + 32 + P::ExternalMessageBytesize::USIZE + 32
+            )
+        }
+        let mut res = Key::<Self>::default();
+
+        // Cannot fail since slices have the same sizes
+        let encapsulation_key_size =
+            <kem::EncapsulationKey<<Self as Decapsulator>::Kem> as KeySizeUser>::KeySize::USIZE;
+        res[..encapsulation_key_size].copy_from_slice(&self.encapsulation_key.to_bytes());
+        res[encapsulation_key_size..encapsulation_key_size + 32]
+            .copy_from_slice(self.decryption_key.as_bytes());
+        res[encapsulation_key_size + 32
+            ..encapsulation_key_size + 32 + P::ExternalMessageBytesize::USIZE]
+            .copy_from_slice(&self.rejection_randomness);
+        res[encapsulation_key_size + 32 + P::ExternalMessageBytesize::USIZE..]
+            .copy_from_slice(&self._kem_seed);
+
+        res
     }
 }
 

@@ -17,6 +17,8 @@ pub mod kem;
 
 mod size_traits;
 
+pub use kem::{Hqc1Kem, Hqc3Kem, Hqc5Kem, HqcKem};
+
 #[derive(PartialEq, Eq, Debug, PartialOrd, Ord, Default, Clone, Copy)]
 pub struct Hqc1;
 #[derive(PartialEq, Eq, Debug, PartialOrd, Ord, Default, Clone, Copy)]
