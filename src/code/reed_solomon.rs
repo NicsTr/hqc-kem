@@ -95,8 +95,6 @@ pub(crate) trait ExternalCode: ShortenedByteReedSolomon {
         })
     }
 
-    // FIXME:
-    /// From Lin, Costello, 1983, Section FIXME
     fn decode_external(
         codeword: &Array<u8, Self::ExternalCodewordBytesize>,
     ) -> Array<u8, Self::ExternalMessageBytesize> {
@@ -262,7 +260,6 @@ pub(crate) trait ShortenedByteReedSolomon: ShortenedByteReedSolomonParam {
             // since the degree of sigma_mu is the number of errors found,
             // which is in turn bound by the maximum distance.
             for i in 1..=(mu + 1).min(max_correctable_error) {
-                // FIXME: re-evaluate: Guaranteed to be always in bound since (mu + 1) always stays in bound
                 d_mu += sigma_mu.coeffs[i] * syndromes[mu + 1 - i];
             }
         }

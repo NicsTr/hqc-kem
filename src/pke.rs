@@ -222,9 +222,4 @@ mod test {
     fn test_encrypt_decrypt_hqc5() {
         test_encrypt_decrypt::<Hqc5>(1339);
     }
-
-    #[test]
-    fn standard_test_vectors() {
-        todo!();
-    }
 }

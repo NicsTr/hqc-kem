@@ -1,4 +1,3 @@
-use core::convert::Infallible;
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use ctutils::{CtAssign, CtEq};
@@ -11,13 +10,12 @@ use hybrid_array::{
 };
 
 use kem::{
-    Decapsulator, Encapsulate, FromSeed, Generate, InvalidKey, Kem, Key, KeyExport, KeySizeUser,
-    Seed, TryDecapsulate, TryKeyInit,
+    Decapsulate, Decapsulator, Encapsulate, FromSeed, Generate, Kem, Key, KeyExport, KeyInit,
+    KeySizeUser, Seed, TryKeyInit,
 };
 use rand::{CryptoRng, TryCryptoRng};
 use zerocopy::IntoBytes;
 
-use crate::code::CodeParams;
 use crate::hash::hash_j;
 use crate::hash::{XofState, hash_g, hash_h};
 use crate::pke::{Ciphertext as PkeCiphertext, DecryptionKey, EncryptionKey, PkeParams};
@@ -30,21 +28,18 @@ pub struct Ciphertext<P: PkeParams> {
     salt: [u8; 16],
 }
 
-impl<P: PkeParams>
-    From<&Array<u8, Sum<Sum<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>, U16>>>
+impl<P: PkeParams> From<&Array<u8, Sum<Sum<Bytesize<P::NBits>, P::CodewordBytesize>, U16>>>
     for Ciphertext<P>
 {
     // TODO: const assert bounds
-    fn from(
-        value: &Array<u8, Sum<Sum<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>, U16>>,
-    ) -> Self {
+    fn from(value: &Array<u8, Sum<Sum<Bytesize<P::NBits>, P::CodewordBytesize>, U16>>) -> Self {
         let pke_ciphertext_bytes: &Array<u8, _> = &value
-            [..Sum::<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>::USIZE]
+            [..Sum::<Bytesize<P::NBits>, P::CodewordBytesize>::USIZE]
             .try_into()
             .unwrap();
         Self {
             pke_ciphertext: pke_ciphertext_bytes.into(),
-            salt: value[Sum::<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>::USIZE..]
+            salt: value[Sum::<Bytesize<P::NBits>, P::CodewordBytesize>::USIZE..]
                 .try_into()
                 .unwrap(),
         }
@@ -52,16 +47,15 @@ impl<P: PkeParams>
 }
 
 impl<P: PkeParams> From<&Ciphertext<P>>
-    for Array<u8, Sum<Sum<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>, U16>>
+    for Array<u8, Sum<Sum<Bytesize<P::NBits>, P::CodewordBytesize>, U16>>
 {
     // TODO: const assert bounds
     fn from(value: &Ciphertext<P>) -> Self {
         let mut res = Array::default();
         let pke_ciphertext_bytes: Array<u8, _> = (&value.pke_ciphertext).into();
-        res[..Sum::<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>::USIZE]
+        res[..Sum::<Bytesize<P::NBits>, P::CodewordBytesize>::USIZE]
             .copy_from_slice(&pke_ciphertext_bytes);
-        res[Sum::<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>::USIZE..]
-            .copy_from_slice(&value.salt);
+        res[Sum::<Bytesize<P::NBits>, P::CodewordBytesize>::USIZE..].copy_from_slice(&value.salt);
         res
     }
 }
@@ -74,8 +68,8 @@ impl<P: PkeParams> KeySizeUser for EncapsulationKey<P> {
     type KeySize = Sum<Bytesize<P::NBits>, U32>;
 }
 
-impl<P: PkeParams> TryKeyInit for EncapsulationKey<P> {
-    fn new(key: &Key<Self>) -> Result<Self, InvalidKey> {
+impl<P: PkeParams> KeyInit for EncapsulationKey<P> {
+    fn new(key: &Key<Self>) -> Self {
         const { assert!(<Key<Self> as AssocArraySize>::Size::USIZE == 32 + Bytesize::<P::NBits>::USIZE) }
 
         let pke_ek = EncryptionKey {
@@ -84,7 +78,13 @@ impl<P: PkeParams> TryKeyInit for EncapsulationKey<P> {
             // Cannot fail since key is of right size (checked by const assert above)
             s: BinaryPolynomial::<P::NBits>::from(&key[32..].try_into().unwrap()),
         };
-        Ok(Self(pke_ek))
+        Self(pke_ek)
+    }
+}
+
+impl<P: PkeParams> TryKeyInit for EncapsulationKey<P> {
+    fn new(key: &Key<Self>) -> Result<Self, kem::InvalidKey> {
+        Ok(<EncapsulationKey<P> as KeyInit>::new(key))
     }
 }
 
@@ -146,13 +146,8 @@ impl<P: PkeParams> Decapsulator for DecapsulationKey<P> {
     }
 }
 
-impl<P: PkeParams> TryDecapsulate for DecapsulationKey<P> {
-    type Error = Infallible;
-
-    fn try_decapsulate(
-        &self,
-        ct: &kem::Ciphertext<Self::Kem>,
-    ) -> Result<kem::SharedKey<Self::Kem>, Self::Error> {
+impl<P: PkeParams> Decapsulate for DecapsulationKey<P> {
+    fn decapsulate(&self, ct: &kem::Ciphertext<Self::Kem>) -> kem::SharedKey<Self::Kem> {
         let ciphertext = Ciphertext::<P>::from(ct);
         let message = self.decryption_key.decrypt(&ciphertext.pke_ciphertext);
         let h = hash_h::<Self::Kem>(self.encapsulation_key());
@@ -173,7 +168,7 @@ impl<P: PkeParams> TryDecapsulate for DecapsulationKey<P> {
             ciphertext.pke_ciphertext.ct_eq(&expected_pke_ciphertext),
         );
 
-        Ok(Array(final_key))
+        Array(final_key)
     }
 }
 
@@ -232,7 +227,7 @@ impl<P: PkeParams> Kem for HqcKem<P> {
 
     type SharedKeySize = U32;
 
-    type CiphertextSize = Sum<Sum<Bytesize<P::NBits>, <P as CodeParams>::CodewordBytesize>, U16>;
+    type CiphertextSize = Sum<Sum<Bytesize<P::NBits>, P::CodewordBytesize>, U16>;
 }
 
 impl<P: PkeParams> FromSeed for HqcKem<P> {
@@ -264,12 +259,23 @@ impl<P: PkeParams> FromSeed for HqcKem<P> {
 
 #[cfg(test)]
 mod test {
-    use kem::Kem;
+    use hybrid_array::Array;
+    use kem::{Decapsulate, Encapsulate, FromSeed, Kem};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
 
-    use crate::kem::Hqc1Kem;
+    use crate::{Hqc3Kem, Hqc5Kem, kem::Hqc1Kem};
 
-    fn test_encaps_decaps<K: Kem>(seed: u64) {
-        todo!()
+    fn test_encaps_decaps<K: Kem + FromSeed>(seed: u64)
+    where
+        K::DecapsulationKey: Decapsulate,
+    {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let hqc_seed = Array::from_fn(|_| rng.random());
+        let (sk, pk) = K::from_seed(&hqc_seed);
+
+        let (ct, ss) = pk.encapsulate_with_rng(&mut rng);
+
+        assert_eq!(sk.decapsulate(&ct), ss);
     }
 
     #[test]
@@ -279,11 +285,11 @@ mod test {
 
     #[test]
     fn test_encaps_decaps_hqc3() {
-        test_encaps_decaps::<Hqc1Kem>(1338);
+        test_encaps_decaps::<Hqc3Kem>(1338);
     }
 
     #[test]
     fn test_encaps_decaps_hqc5() {
-        test_encaps_decaps::<Hqc1Kem>(1339);
+        test_encaps_decaps::<Hqc5Kem>(1339);
     }
 }

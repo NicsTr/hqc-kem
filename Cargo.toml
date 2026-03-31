@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-hybrid-array = { path = "../hybrid-array", features = ["extra-sizes", "zerocopy"] }
+hybrid-array = { git = "https://github.com/NicsTr/hybrid-array.git", version = "0.4.10", features = ["extra-sizes", "zerocopy"] }
 bitvec = { version = "1.0.1", default-features = false }
-cmov = "0.5.2"
-ctutils = { version = "0.4.0", path = "../../utils/ctutils" }
+cmov = { git = "https://github.com/NicsTr/utils.git" }
+ctutils = { git = "https://github.com/NicsTr/utils.git" }
 sha3 = { version = "0.10.8", default-features = false }
 zerocopy = "0.8.39"
-kem = { path="../traits/kem" }
+kem = { git = "https://github.com/NicsTr/traits.git" }
 rand = "0.10.0-rc.1"
 rand_core = "0.10.0-rc-2"
 
@@ -18,13 +18,5 @@ rand_core = "0.10.0-rc-2"
 std = []
 
 [dev-dependencies]
-criterion = "0.7"
 hex = "0.4.3"
-
-[lib]
-bench = false
-
-[[bench]]
-name = "rm_encode_decode"
-harness = false
 

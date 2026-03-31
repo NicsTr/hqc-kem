@@ -1,7 +1,7 @@
 use std::{convert::Infallible, str::Lines};
 
 use hybrid_array::Array;
-use kem::{Encapsulate, FromSeed, Kem, KeyExport};
+use kem::{Decapsulate, Encapsulate, FromSeed, Kem, KeyExport};
 use rand::{Rng, TryCryptoRng, TryRng};
 use sha3::{
     Shake256, Shake256Reader,
@@ -57,7 +57,7 @@ fn test_single_kat<Hqc: Kem + FromSeed>(
     expected_ct: &str,
     expected_ss: &str,
 ) where
-    <Hqc as Kem>::DecapsulationKey: KeyExport,
+    Hqc::DecapsulationKey: KeyExport + Decapsulate,
 {
     let kat_seed_bytes = hex::decode(kat_seed).unwrap();
 
@@ -75,8 +75,7 @@ fn test_single_kat<Hqc: Kem + FromSeed>(
     assert_eq!(hex::decode(expected_ct).unwrap()[..], ct[..]);
     assert_eq!(hex::decode(expected_ss).unwrap()[..], ss[..]);
 
-    // TODO:
-    // test decaps
+    assert_eq!(ss, sk.decapsulate(&ct));
 }
 
 fn next_line<'a>(haystack: &mut Lines<'a>, needle: &str) -> &'a str {
@@ -93,7 +92,7 @@ fn next_line<'a>(haystack: &mut Lines<'a>, needle: &str) -> &'a str {
 
 fn test_all_kat<Hqc: Kem + FromSeed>(kats_resp: &str)
 where
-    <Hqc as Kem>::DecapsulationKey: KeyExport,
+    Hqc::DecapsulationKey: KeyExport + Decapsulate,
 {
     let seed_for_seeds = hex::decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f").unwrap();
     let mut rng = KatCryptoRng::new(&seed_for_seeds);
