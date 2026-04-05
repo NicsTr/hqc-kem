@@ -85,6 +85,7 @@ where
 mod karatsuba_multiplication {
 
     /// Base cumulative multiplication.
+    // FIXME: replace with more optimized one (M4R + sliding window)
     fn base_mul(c: &mut [u64; 2], a: u64, b: u64) {
         for i in 0..u64::BITS {
             let ai = (a >> i) & 1;
