@@ -1,11 +1,11 @@
 use core::fmt::Debug;
-use core::ops::Add;
+use core::ops::{Add, Mul};
 
 use ctutils::{Choice, CtEq};
 use hybrid_array::{
     Array, ArraySize,
-    sizes::{U8, U16, U32, U64, U66, U75, U96, U100, U114, U131, U149, U17669, U35851, U57637},
-    typenum::{Sum, Unsigned},
+    sizes::{U2, U8, U16, U32, U64, U66, U75, U96, U100, U114, U131, U149, U17669, U35851, U57637},
+    typenum::{Prod, Sum, Unsigned},
 };
 use kem::KeySizeUser;
 use zerocopy::{Immutable, IntoBytes};
@@ -15,7 +15,7 @@ use crate::{
     code::{Code, CodeParams},
     hash::{XofState, hash_i},
     polynomial::BinaryPolynomial,
-    size_traits::{Bytesize, WordsizeFromBitsize},
+    size_traits::{Bytesize, Octobytesize, WordsizeFromBitsize},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,17 +36,19 @@ impl<P: PkeParams> EncryptionKey<P> {
         theta: &[u8; 32],
     ) -> Ciphertext<P> {
         let mut xof_h = XofState::new(&self.ek_seed);
-        let h = xof_h.sample_vect();
+        let mut h = xof_h.sample_vect::<P>();
 
         let mut xof_encrypt = XofState::new(theta);
-        let r2 = xof_encrypt.sample_fixed_weight_vect_biased::<P::We, P::NBits>();
-        let e = xof_encrypt.sample_fixed_weight_vect_biased::<P::We, P::NBits>();
-        let r1 = xof_encrypt.sample_fixed_weight_vect_biased::<P::We, P::NBits>();
+        let mut r2 = xof_encrypt.sample_fixed_weight_vect_biased::<P>();
+        let e = xof_encrypt.sample_fixed_weight_vect_biased::<P>();
+        let r1 = xof_encrypt.sample_fixed_weight_vect_biased::<P>();
 
-        let u = r1 + h * &r2;
+        // TODO: directly sample into multiplication result, to avoid using r1 as a temp variable
+        let u = r1 + h.low_stack_mul(&mut r2);
         let mut v = <P as Code>::encode(message);
 
-        let mask = r2 * &self.s + e;
+        // We need mutability of self.s for in-place multiplication, so we do a big copy here...
+        let mask = r2.low_stack_mul(&mut self.s.clone()) + e;
 
         for (vi, mi) in v
             .as_mut_bytes()
@@ -77,13 +79,14 @@ impl DecryptionKey {
 
         // Generate decryption key
         let mut xof_x_y = XofState::new(&dk_seed);
-        let y = xof_x_y.sample_fixed_weight_vect_rejection::<P::W, P::NBits>();
-        let x = xof_x_y.sample_fixed_weight_vect_rejection::<P::W, P::NBits>();
+        let mut y = xof_x_y.sample_fixed_weight_vect_rejection::<P>();
+        let x = xof_x_y.sample_fixed_weight_vect_rejection::<P>();
 
         // Generate encryption key
         let mut xof_h = XofState::new(&ek_seed);
-        let h = xof_h.sample_vect();
-        let s = x + h * &y;
+        let mut h = xof_h.sample_vect::<P>();
+        // TODO: directly sample x into multiplication result, to avoid using x as a temp variable
+        let s = x + h.low_stack_mul(&mut y);
 
         (EncryptionKey { ek_seed, s }, Self(dk_seed))
     }
@@ -93,21 +96,20 @@ impl DecryptionKey {
         ciphertext: &Ciphertext<P>,
     ) -> Array<u8, P::ExternalMessageBytesize> {
         let mut xof_x_y = XofState::new(&self.0);
-        let y = xof_x_y.sample_fixed_weight_vect_rejection::<P::W, P::NBits>();
+        let mut y = xof_x_y.sample_fixed_weight_vect_rejection::<P>();
 
-        let demask = y * &ciphertext.u;
+        // We need mutability of u for in-place multiplication, so we do a big copy here...
+        let mut demask = y.low_stack_mul(&mut ciphertext.u.clone());
+        let demask_ref = demask.as_mut_bytes_truncated::<<P as CodeParams>::CodewordBytesize>();
 
-        let mut v = ciphertext.v.clone();
-
-        for (vi, mi) in v
-            .as_mut_bytes()
-            .iter_mut()
-            .zip(demask.as_bytes_truncated::<<P as CodeParams>::CodewordBytesize>())
-        {
-            *vi ^= mi;
+        for (demaski, vi) in demask_ref.iter_mut().zip(ciphertext.v.as_bytes()) {
+            *demaski ^= vi;
         }
 
-        P::decode(&v)
+        // Ugly, but this is done to avoid copying data around...
+        let demask_ref: &mut Array<_, _> = demask_ref.try_into().unwrap();
+
+        P::decode(demask_ref)
     }
 }
 
@@ -163,6 +165,9 @@ where
     Sum<Sum<Bytesize<Self::NBits>, U96>, Self::ExternalMessageBytesize>: ArraySize, // Decapsulation key
     Sum<Bytesize<Self::NBits>, Self::CodewordBytesize>: ArraySize + Add<U16>,
     Sum<Sum<Bytesize<Self::NBits>, Self::CodewordBytesize>, U16>: ArraySize,
+    // Karatsuba buffer
+    Octobytesize<Self::NBits>: Mul<U2>,
+    Prod<Octobytesize<Self::NBits>, U2>: ArraySize,
 {
     type NBits: PartialEq + Eq + Debug + WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>;
     type W: ArraySize;

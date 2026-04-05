@@ -19,4 +19,9 @@ std = []
 
 [dev-dependencies]
 hex = "0.4.3"
+criterion = "0.8.2"
+
+[[bench]]
+name = "kem"
+harness = false
 

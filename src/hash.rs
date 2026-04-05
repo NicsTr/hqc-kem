@@ -1,9 +1,5 @@
 use ctutils::{Choice, CtAssign, CtEq, CtLt, CtSelect};
-use hybrid_array::{
-    Array, ArraySize,
-    sizes::{U8, U64},
-    typenum::Unsigned,
-};
+use hybrid_array::{Array, ArraySize, typenum::Unsigned};
 use kem::{Kem, KeyExport};
 use sha3::{
     Digest, Sha3_256, Sha3_512, Shake256, Shake256Reader,
@@ -11,9 +7,7 @@ use sha3::{
 };
 use zerocopy::IntoBytes;
 
-use crate::{
-    kem::Ciphertext, pke::PkeParams, polynomial::BinaryPolynomial, size_traits::WordsizeFromBitsize,
-};
+use crate::{kem::Ciphertext, pke::PkeParams, polynomial::BinaryPolynomial};
 
 const XOF_DOMAIN_SEPARATOR: u8 = 1;
 const G_DOMAIN_SEPARATOR: u8 = 0;
@@ -192,16 +186,13 @@ impl XofState {
         res
     }
 
-    pub(crate) fn sample_fixed_weight_vect_rejection<
-        W: ArraySize,
-        NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>,
-    >(
+    pub(crate) fn sample_fixed_weight_vect_rejection<P: PkeParams>(
         &mut self,
-    ) -> BinaryPolynomial<NBits> {
+    ) -> BinaryPolynomial<P::NBits> {
         let mut res = BinaryPolynomial::zero();
 
         // TODO: Do it while sampling the support, to minimize memory footprint.
-        for v in self.generate_random_support_rejection::<W, NBits>() {
+        for v in self.generate_random_support_rejection::<P::W, P::NBits>() {
             res.set_coefficient(v);
         }
 
@@ -209,32 +200,30 @@ impl XofState {
     }
 
     /// Sample a fixed weight bin.
-    pub(crate) fn sample_fixed_weight_vect_biased<
-        W: ArraySize,
-        NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>,
-    >(
+    pub(crate) fn sample_fixed_weight_vect_biased<P: PkeParams>(
         &mut self,
-    ) -> BinaryPolynomial<NBits> {
+    ) -> BinaryPolynomial<P::NBits> {
         let mut res = BinaryPolynomial::zero();
 
         // TODO: Do it while sampling the support, to minimize memory footprint.
-        for v in self.generate_random_support_biased::<W, NBits>() {
+        for v in self.generate_random_support_biased::<P::We, P::NBits>() {
             res.set_coefficient(v);
         }
 
         res
     }
 
+    // TODO: impl "sample + xor into" function
+
     /// Sample a vector uniformly at random.
-    pub(crate) fn sample_vect<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>>(
-        &mut self,
-    ) -> BinaryPolynomial<NBits> {
-        Array::from_fn(|_| {
+    pub(crate) fn sample_vect<P: PkeParams>(&mut self) -> BinaryPolynomial<P::NBits> {
+        let arr = Array::from_fn(|_| {
             let mut buf: [u8; 8] = Default::default();
             self.0.read(&mut buf);
             u64::from_le_bytes(buf)
-        })
-        .into()
+        });
+
+        arr.into()
     }
 }
 
