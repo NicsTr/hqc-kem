@@ -1,6 +1,6 @@
 use core::ops::{Add, Mul};
 
-use ctutils::CtEq;
+use ctutils::{CtEq, CtSelect};
 use hybrid_array::{
     Array, ArraySize,
     sizes::{U2, U8, U64},
@@ -83,19 +83,69 @@ where
 }
 
 mod karatsuba_multiplication {
+    use ctutils::Choice;
+
+    use super::CtSelect;
+
+    #[inline(always)]
+    fn w_index(val: u64, offset: usize) -> usize {
+        ((val >> offset) & 7) as usize
+    }
 
     /// Base cumulative multiplication.
-    // FIXME: replace with more optimized one (M4R + sliding window)
+    ///
+    /// Algorithm mul1, from : Brent, Gaudry, Thomé, Zimmerman, 2007
+    /// and https://gitlab.inria.fr/gf2x/gf2x implementation
     fn base_mul(c: &mut [u64; 2], a: u64, b: u64) {
-        for i in 0..u64::BITS {
-            let ai = (a >> i) & 1;
-            for j in 0..u64::BITS {
-                let bj = (b >> j) & 1;
-                let target_index = (i + j) as usize;
-                c[target_index / (u64::BITS as usize)] ^=
-                    (ai & bj) << (target_index % (u64::BITS as usize));
-            }
-        }
+        // Step 1: tabulate
+        let mut u = [0u64; 16];
+        u[1] = a;
+        u[2] = u[1] << 1;
+        u[3] = u[2] ^ a;
+        u[4] = u[2] << 1;
+        u[5] = u[4] ^ a;
+        u[6] = u[3] << 1;
+        u[7] = u[6] ^ a;
+
+        // Step 2: multiply
+        let mut lo = (u[(b >> 63) as usize] << 3) ^ u[w_index(b, 60)];
+        let mut hi = lo >> 58;
+        lo = (lo << 6) ^ (u[w_index(b, 57)] << 3) ^ u[w_index(b, 54)];
+        hi = (hi << 6) | (lo >> 58);
+        lo = (lo << 6) ^ (u[w_index(b, 51)] << 3) ^ u[w_index(b, 48)];
+        hi = (hi << 6) | (lo >> 58);
+        lo = (lo << 6) ^ (u[w_index(b, 45)] << 3) ^ u[w_index(b, 42)];
+        hi = (hi << 6) | (lo >> 58);
+        lo = (lo << 6) ^ (u[w_index(b, 39)] << 3) ^ u[w_index(b, 36)];
+        hi = (hi << 6) | (lo >> 58);
+        lo = (lo << 6) ^ (u[w_index(b, 33)] << 3) ^ u[w_index(b, 30)];
+        hi = (hi << 6) | (lo >> 58);
+        lo = (lo << 6) ^ (u[w_index(b, 27)] << 3) ^ u[w_index(b, 24)];
+        hi = (hi << 6) | (lo >> 58);
+        lo = (lo << 6) ^ (u[w_index(b, 21)] << 3) ^ u[w_index(b, 18)];
+        hi = (hi << 6) | (lo >> 58);
+        lo = (lo << 6) ^ (u[w_index(b, 15)] << 3) ^ u[w_index(b, 12)];
+        hi = (hi << 6) | (lo >> 58);
+        lo = (lo << 6) ^ (u[w_index(b, 9)] << 3) ^ u[w_index(b, 6)];
+        hi = (hi << 6) | (lo >> 58);
+        lo = (lo << 6) ^ (u[w_index(b, 3)] << 3) ^ u[(b & 7) as usize];
+
+        // Step 3: repair
+        let mut need_repair;
+
+        need_repair = Choice::from_u64_lsb(a >> 63);
+        hi = hi ^ 0u64.ct_select(&((b & 0xefbefbefbefbefbe) >> 1), need_repair);
+        need_repair = Choice::from_u64_lsb(a >> 62);
+        hi ^= 0u64.ct_select(&((b & 0xcf3cf3cf3cf3cf3c) >> 2), need_repair);
+        need_repair = Choice::from_u64_lsb(a >> 61);
+        hi ^= 0u64.ct_select(&((b & 0x8e38e38e38e38e38) >> 3), need_repair);
+        need_repair = Choice::from_u64_lsb(a >> 60);
+        hi ^= 0u64.ct_select(&((b & 0xc30c30c30c30c30) >> 4), need_repair);
+        need_repair = Choice::from_u64_lsb(a >> 59);
+        hi ^= 0u64.ct_select(&((b & 0x820820820820820) >> 5), need_repair);
+
+        c[0] ^= lo;
+        c[1] ^= hi;
     }
 
     /// Xor part of `value` to itself (may overlap).

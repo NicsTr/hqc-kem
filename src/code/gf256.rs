@@ -26,7 +26,7 @@ impl Gf256 {
             // Square
             res *= res;
             // Constant-time conditional multiply
-            let do_multiply = Choice::from_u8_lsb((exp >> (u8::BITS - i - 1)) & 1);
+            let do_multiply = Choice::from_u8_lsb(exp >> (u8::BITS - i - 1));
             res *= Gf256(1.ct_select(&self.0, do_multiply));
         }
 
@@ -38,7 +38,20 @@ impl Gf256 {
     /// For completeness, inv(0) = 0.
     // TODO: optimize with inline square and multiply
     pub(crate) fn inv(self) -> Self {
-        self.pow(254)
+        let base2 = self * self;
+        let base3 = self * base2;
+        let base4 = base2 * base2;
+        let base7 = base3 * base4;
+        let base11 = base7 * base4;
+        let base15 = base11 * base4;
+        let base30 = base15 * base15;
+        let base60 = base30 * base30;
+        let base120 = base60 * base60;
+        let base127 = base120 * base7;
+
+        base127 * base127
+
+        // self.pow(254)
     }
 }
 
