@@ -3,10 +3,8 @@ use std::{convert::Infallible, str::Lines};
 use hybrid_array::Array;
 use kem::{Decapsulate, Encapsulate, FromSeed, Kem, KeyExport};
 use rand::{Rng, TryCryptoRng, TryRng};
-use sha3::{
-    Shake256, Shake256Reader,
-    digest::{ExtendableOutput, Update, XofReader},
-};
+use sha3::digest::{ExtendableOutput, Update, XofReader};
+use shake::{Shake256, Shake256Reader};
 
 use hqc_kem::{Hqc1Kem, Hqc3Kem, Hqc5Kem};
 

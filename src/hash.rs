@@ -1,13 +1,17 @@
 use ctutils::{Choice, CtAssign, CtEq, CtLt, CtSelect};
 use hybrid_array::{Array, ArraySize, typenum::Unsigned};
-use kem::{Kem, KeyExport};
 use sha3::{
-    Digest, Sha3_256, Sha3_512, Shake256, Shake256Reader,
+    Digest, Sha3_256, Sha3_512,
     digest::{ExtendableOutput, Update, XofReader},
 };
+use shake::{Shake256, Shake256Reader};
 use zerocopy::IntoBytes;
 
-use crate::{kem::Ciphertext, pke::PkeParams, polynomial::BinaryPolynomial};
+use crate::{
+    kem::{Ciphertext, EncapsulationKey},
+    pke::PkeParams,
+    polynomial::BinaryPolynomial,
+};
 
 const XOF_DOMAIN_SEPARATOR: u8 = 1;
 const G_DOMAIN_SEPARATOR: u8 = 0;
@@ -29,9 +33,10 @@ pub(crate) fn hash_g<P: PkeParams>(
         .into()
 }
 
-pub(crate) fn hash_h<K: Kem>(ek: &K::EncapsulationKey) -> [u8; 32] {
+pub(crate) fn hash_h<P: PkeParams>(ek: &EncapsulationKey<P>) -> [u8; 32] {
     Sha3_256::new()
-        .chain_update(ek.to_bytes())
+        .chain_update(ek.ek_seed_as_bytes())
+        .chain_update(ek.s_as_bytes())
         .chain_update([H_DOMAIN_SEPARATOR])
         .finalize()
         .into()
@@ -53,7 +58,9 @@ pub(crate) fn hash_j<P: PkeParams>(
     Sha3_256::new()
         .chain_update(h)
         .chain_update(rejection_randomness)
-        .chain_update(Array::<u8, _>::from(ciphertext))
+        .chain_update(ciphertext.pke_ciphertext_u_as_bytes())
+        .chain_update(ciphertext.pke_ciphertext_v_as_bytes())
+        .chain_update(ciphertext.salt_as_bytes())
         .chain_update([J_DOMAIN_SEPARATOR])
         .finalize()
         .into()
@@ -186,12 +193,12 @@ impl XofState {
         res
     }
 
+    #[inline(always)]
     pub(crate) fn sample_fixed_weight_vect_rejection<P: PkeParams>(
         &mut self,
     ) -> BinaryPolynomial<P::NBits> {
         let mut res = BinaryPolynomial::zero();
 
-        // TODO: Do it while sampling the support, to minimize memory footprint.
         for v in self.generate_random_support_rejection::<P::W, P::NBits>() {
             res.set_coefficient(v);
         }
@@ -200,12 +207,12 @@ impl XofState {
     }
 
     /// Sample a fixed weight bin.
+    #[inline(always)]
     pub(crate) fn sample_fixed_weight_vect_biased<P: PkeParams>(
         &mut self,
     ) -> BinaryPolynomial<P::NBits> {
         let mut res = BinaryPolynomial::zero();
 
-        // TODO: Do it while sampling the support, to minimize memory footprint.
         for v in self.generate_random_support_biased::<P::We, P::NBits>() {
             res.set_coefficient(v);
         }
@@ -213,9 +220,8 @@ impl XofState {
         res
     }
 
-    // TODO: impl "sample + xor into" function
-
     /// Sample a vector uniformly at random.
+    #[inline(always)]
     pub(crate) fn sample_vect<P: PkeParams>(&mut self) -> BinaryPolynomial<P::NBits> {
         let arr = Array::from_fn(|_| {
             let mut buf: [u8; 8] = Default::default();

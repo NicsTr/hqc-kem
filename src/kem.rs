@@ -28,6 +28,21 @@ pub struct Ciphertext<P: PkeParams> {
     salt: [u8; 16],
 }
 
+// TODO: find a way to use derive(IntoBytes)
+impl<P: PkeParams> Ciphertext<P> {
+    pub(crate) fn pke_ciphertext_u_as_bytes(&self) -> &[u8] {
+        self.pke_ciphertext.u.as_bytes()
+    }
+
+    pub(crate) fn pke_ciphertext_v_as_bytes(&self) -> &[u8] {
+        self.pke_ciphertext.v.as_bytes()
+    }
+
+    pub(crate) fn salt_as_bytes(&self) -> &[u8] {
+        self.salt.as_bytes()
+    }
+}
+
 impl<P: PkeParams> From<&Array<u8, Sum<Sum<Bytesize<P::NBits>, P::CodewordBytesize>, U16>>>
     for Ciphertext<P>
 {
@@ -62,6 +77,17 @@ impl<P: PkeParams> From<&Ciphertext<P>>
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncapsulationKey<P: PkeParams>(EncryptionKey<P>);
+
+// TODO: find a way to use derive(IntoBytes)
+impl<P: PkeParams> EncapsulationKey<P> {
+    pub(crate) fn ek_seed_as_bytes(&self) -> &[u8] {
+        self.0.ek_seed.as_bytes()
+    }
+
+    pub(crate) fn s_as_bytes(&self) -> &[u8] {
+        self.0.s.as_bytes()
+    }
+}
 
 // TODO: impl KeySizeUser for DecapsulationKey
 impl<P: PkeParams> KeySizeUser for EncapsulationKey<P> {
@@ -117,7 +143,7 @@ impl<P: PkeParams> Encapsulate for EncapsulationKey<P> {
         rng.fill_bytes(&mut message);
         rng.fill_bytes(&mut salt);
 
-        let g = hash_g::<P>(&hash_h::<Self::Kem>(self), &message, &salt);
+        let g = hash_g::<P>(&hash_h(self), &message, &salt);
 
         let (shared_key, theta) = g.split_at(<Self::Kem as Kem>::SharedKeySize::USIZE);
 
@@ -150,7 +176,7 @@ impl<P: PkeParams> Decapsulate for DecapsulationKey<P> {
     fn decapsulate(&self, ct: &kem::Ciphertext<Self::Kem>) -> kem::SharedKey<Self::Kem> {
         let ciphertext = Ciphertext::<P>::from(ct);
         let message = self.decryption_key.decrypt(&ciphertext.pke_ciphertext);
-        let h = hash_h::<Self::Kem>(self.encapsulation_key());
+        let h = hash_h(self.encapsulation_key());
         let g = hash_g::<P>(&h, &message, &ciphertext.salt);
 
         let (shared_key, theta) = g.split_at(<Self::Kem as Kem>::SharedKeySize::USIZE);
@@ -263,7 +289,7 @@ mod test {
     use kem::{Decapsulate, Encapsulate, FromSeed, Kem};
     use rand::{RngExt, SeedableRng, rngs::StdRng};
 
-    use crate::{Hqc3Kem, Hqc5Kem, kem::Hqc1Kem};
+    use crate::{Hqc1Kem, Hqc3Kem, Hqc5Kem};
 
     fn test_encaps_decaps<K: Kem + FromSeed>(seed: u64)
     where

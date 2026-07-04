@@ -36,19 +36,22 @@ impl<P: PkeParams> EncryptionKey<P> {
         theta: &[u8; 32],
     ) -> Ciphertext<P> {
         let mut xof_h = XofState::new(&self.ek_seed);
-        let mut h = xof_h.sample_vect::<P>();
+        let mut h_r2 = xof_h.sample_vect::<P>();
 
         let mut xof_encrypt = XofState::new(theta);
         let mut r2 = xof_encrypt.sample_fixed_weight_vect_biased::<P>();
+        h_r2 *= &mut r2;
+
+        let mut r2_s = r2;
+        // We need mutability of self.s for in-place multiplication, so we do a big copy here...
+        r2_s *= &mut self.s.clone();
+
         let e = xof_encrypt.sample_fixed_weight_vect_biased::<P>();
+        let mask = r2_s + e;
         let r1 = xof_encrypt.sample_fixed_weight_vect_biased::<P>();
 
-        // TODO: directly sample into multiplication result, to avoid using r1 as a temp variable
-        let u = r1 + h.low_stack_mul(&mut r2);
+        let u = r1 + h_r2;
         let mut v = <P as Code>::encode(message);
-
-        // We need mutability of self.s for in-place multiplication, so we do a big copy here...
-        let mask = r2.low_stack_mul(&mut self.s.clone()) + e;
 
         for (vi, mi) in v
             .as_mut_bytes()
@@ -77,18 +80,24 @@ impl DecryptionKey {
             .try_into()
             .expect("size invariant violated");
 
+        // Generate encryption key
+        let mut xof_h = XofState::new(&ek_seed);
+        let mut h_y = xof_h.sample_vect::<P>();
+
         // Generate decryption key
         let mut xof_x_y = XofState::new(&dk_seed);
         let mut y = xof_x_y.sample_fixed_weight_vect_rejection::<P>();
+        h_y *= &mut y;
+
         let x = xof_x_y.sample_fixed_weight_vect_rejection::<P>();
 
-        // Generate encryption key
-        let mut xof_h = XofState::new(&ek_seed);
-        let mut h = xof_h.sample_vect::<P>();
-        // TODO: directly sample x into multiplication result, to avoid using x as a temp variable
-        let s = x + h.low_stack_mul(&mut y);
-
-        (EncryptionKey { ek_seed, s }, Self(dk_seed))
+        (
+            EncryptionKey {
+                ek_seed,
+                s: x + h_y,
+            },
+            Self(dk_seed),
+        )
     }
 
     pub(crate) fn decrypt<P: PkeParams>(
@@ -96,26 +105,26 @@ impl DecryptionKey {
         ciphertext: &Ciphertext<P>,
     ) -> Array<u8, P::ExternalMessageBytesize> {
         let mut xof_x_y = XofState::new(&self.0);
-        let mut y = xof_x_y.sample_fixed_weight_vect_rejection::<P>();
+        let mut y_u = xof_x_y.sample_fixed_weight_vect_rejection::<P>();
 
-        // We need mutability of u for in-place multiplication, so we do a big copy here...
-        let mut demask = y.low_stack_mul(&mut ciphertext.u.clone());
-        let demask_ref = demask.as_mut_bytes_truncated::<<P as CodeParams>::CodewordBytesize>();
+        // We need mutability of u for in-place multiplication, so we do a big clone here...
+        y_u *= &mut ciphertext.u.clone();
+        let demask = y_u.as_mut_bytes_truncated::<<P as CodeParams>::CodewordBytesize>();
 
-        for (demaski, vi) in demask_ref.iter_mut().zip(ciphertext.v.as_bytes()) {
+        for (demaski, vi) in demask.iter_mut().zip(ciphertext.v.as_bytes()) {
             *demaski ^= vi;
         }
 
         // Ugly, but this is done to avoid copying data around...
-        let demask_ref: &mut Array<_, _> = demask_ref.try_into().unwrap();
+        let c: &mut Array<_, _> = demask.try_into().unwrap();
 
-        P::decode(demask_ref)
+        P::decode(c)
     }
 }
 
 pub(crate) struct Ciphertext<P: PkeParams> {
-    u: BinaryPolynomial<P::NBits>,
-    v: Array<u8, <P as CodeParams>::CodewordBytesize>,
+    pub(crate) u: BinaryPolynomial<P::NBits>,
+    pub(crate) v: Array<u8, <P as CodeParams>::CodewordBytesize>,
 }
 
 impl<P: PkeParams> From<&Ciphertext<P>>

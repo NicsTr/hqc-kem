@@ -1,4 +1,4 @@
-use core::ops::{Add, Mul};
+use core::ops::{Add, AddAssign, Mul, MulAssign};
 
 use ctutils::{CtEq, CtSelect};
 use hybrid_array::{
@@ -44,7 +44,11 @@ where
     ///
     /// This should avoid any copy.
     pub(crate) fn as_mut_bytes_truncated<NBytes: ArraySize>(&mut self) -> &mut [u8] {
-        const { assert!(NBytes::USIZE * 8 < NBits::USIZE) }
+        const {
+            assert!(NBytes::USIZE * 8 < NBits::USIZE);
+            // TODO: do something for big-endian targets
+            assert!(cfg!(target_endian = "little"));
+        }
         &mut self.0.as_mut_bytes()[..NBytes::USIZE]
     }
 
@@ -52,12 +56,24 @@ where
     ///
     /// This should avoid any copy.
     pub(crate) fn as_bytes_truncated<NBytes: ArraySize>(&self) -> &[u8] {
-        const { assert!(NBytes::USIZE * 8 < NBits::USIZE) }
+        const {
+            assert!(NBytes::USIZE * 8 < NBits::USIZE);
+            // TODO: do something for big-endian targets
+            assert!(cfg!(target_endian = "little"));
+        }
         &self.0.as_bytes()[..NBytes::USIZE]
     }
 
-    /// Reduction modulo X^NBits - 1
-    fn reduce(mut value: Array<u64, Prod<Octobytesize<NBits>, U2>>) -> Self {
+    /// Return a reference to a slice of bytes containing the coefficient of this polynomial.
+    ///
+    /// This should avoid any copy.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        const { assert!(cfg!(target_endian = "little")) }
+        &self.0.as_bytes()[..Bytesize::<NBits>::USIZE]
+    }
+
+    /// Reduction of value modulo X^NBits - 1, written into self
+    fn reduce_assign(&mut self, mut value: Array<u64, Prod<Octobytesize<NBits>, U2>>) {
         let reduced_size = Octobytesize::<NBits>::USIZE;
 
         for i in 0..reduced_size {
@@ -66,20 +82,29 @@ where
         }
         value[reduced_size - 1] &= Self::LAST_WORD_MASK;
 
-        Self(value[..reduced_size].try_into().unwrap())
+        // Reduced size is exactly the size of Self
+        self.0[..].copy_from_slice(&value[..reduced_size]);
     }
+}
 
+impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>> MulAssign<&mut Self>
+    for BinaryPolynomial<NBits>
+where
+    Octobytesize<NBits>: Mul<U2>,
+    Prod<Octobytesize<NBits>, U2>: ArraySize,
+{
     /// Karatsuba multiplication using only 2n temporary buffer
+    /// This effectively implements self *= other
     ///
-    /// Both paramaters are mutated while computing, but restored before returning.
-    pub(crate) fn low_stack_mul(&mut self, other: &mut Self) -> Self {
+    /// Both paramaters are mutated while computing, but rhs is restored before returning.
+    // TODO: find a way (unsafe) to remove the need for rhs mutability
+    fn mul_assign(&mut self, rhs: &mut Self) {
         let mut tmp = Array::<u64, Prod<Octobytesize<NBits>, U2>>::default();
 
-        karatsuba_multiplication::cumulative_karatsuba(&mut tmp[..], &mut self.0, &mut other.0);
-        Self::reduce(tmp)
-    }
+        karatsuba_multiplication::cumulative_karatsuba(&mut tmp, &mut self.0, &mut rhs.0);
 
-    // cumulative_karatsuba_inner(&mut self,
+        self.reduce_assign(tmp);
+    }
 }
 
 mod karatsuba_multiplication {
@@ -134,7 +159,7 @@ mod karatsuba_multiplication {
         let mut need_repair;
 
         need_repair = Choice::from_u64_lsb(a >> 63);
-        hi = hi ^ 0u64.ct_select(&((b & 0xefbefbefbefbefbe) >> 1), need_repair);
+        hi ^= 0u64.ct_select(&((b & 0xefbefbefbefbefbe) >> 1), need_repair);
         need_repair = Choice::from_u64_lsb(a >> 62);
         hi ^= 0u64.ct_select(&((b & 0xcf3cf3cf3cf3cf3c) >> 2), need_repair);
         need_repair = Choice::from_u64_lsb(a >> 61);
@@ -226,13 +251,12 @@ where
         }
 
         let mut res = Array::default();
-        let mut chunk_iter = value.chunks_exact(size_of::<u64>());
-        for (a, b) in res.iter_mut().zip(&mut chunk_iter) {
+        let (chunk_iter, remainder) = value.as_chunks::<{ size_of::<u64>() }>();
+        for (a, b) in res.iter_mut().zip(chunk_iter) {
             // Cannot fail with the use of chunks_exact
-            *a = u64::from_le_bytes(b.try_into().unwrap());
+            *a = u64::from_le_bytes(*b);
         }
 
-        let remainder = chunk_iter.remainder();
         let mut last_word = [0u8; size_of::<u64>()];
         // Cannot fail since remainder length is guaranteed to be strictly less than size_of::<u64>
         last_word[..remainder.len()].copy_from_slice(remainder);
@@ -258,13 +282,11 @@ where
         }
 
         let mut res = Array::default();
-        let mut chunk_iter = res.chunks_exact_mut(size_of::<u64>());
-        for (a, b) in (&mut chunk_iter).zip(value.0.iter()) {
+        let (chunk_iter, remainder) = res.as_chunks_mut::<{ size_of::<u64>() }>();
+        for (a, b) in chunk_iter.iter_mut().zip(value.0.iter()) {
             // Cannot fail since chunk is of exactly the right size
             a.copy_from_slice(&b.to_le_bytes());
         }
-
-        let remainder = chunk_iter.into_remainder();
 
         // Cannot fail since value is never empty and slice sizes are equals
         remainder.copy_from_slice(&value.0.last().unwrap().to_le_bytes()[..remainder.len()]);
@@ -294,7 +316,18 @@ where
     type Output = BinaryPolynomial<NBits>;
 
     fn add(self, rhs: Self) -> Self::Output {
-        BinaryPolynomial(rhs.0.iter().zip(self.0).map(|(a, b)| a ^ b).collect())
+        BinaryPolynomial(self.0.iter().zip(rhs.0).map(|(a, b)| a ^ b).collect())
+    }
+}
+
+impl<NBits: WordsizeFromBitsize<U64> + WordsizeFromBitsize<U8>> AddAssign
+    for BinaryPolynomial<NBits>
+where
+    Octobytesize<NBits>: Mul<U2>,
+    Prod<Octobytesize<NBits>, U2>: ArraySize,
+{
+    fn add_assign(&mut self, rhs: Self) {
+        self.0.iter_mut().zip(rhs.0).for_each(|(v, r)| *v ^= r);
     }
 }
 
@@ -418,9 +451,8 @@ mod test {
         let a = [0xaaaa_bbbb_cccc_dddd, 0x1999_8888_7777_6666, 0, 0];
         let b = [0x0706_0504_0302_0100, 0x0F0E_0D0C_0B0A_0908, 0, 0];
 
-        let c: BinaryPolynomial<U256> =
-            BinaryPolynomial(Array(a)).low_stack_mul(&mut BinaryPolynomial(Array(b)));
-        // BinaryPolynomial::<U127>::low_stack_mult(&mut BinaryPolynomial(a, b);
+        let mut c = BinaryPolynomial(Array::<u64, U4>(a.clone()));
+        c *= &mut BinaryPolynomial(Array(b));
 
         let tmp: BinaryPolynomial<U256> = BinaryPolynomial(Array::<u64, U4>(a)) * &Array(b).into();
 
@@ -429,9 +461,8 @@ mod test {
         let a = [0xaaaa_bbbb_cccc_dddd, 0x1999_8888_7777_6666];
         let b = [0xbc, 0x6f];
 
-        let c: BinaryPolynomial<U127> =
-            BinaryPolynomial(Array(a)).low_stack_mul(&mut BinaryPolynomial(Array(b)));
-        // BinaryPolynomial::<U127>::low_stack_mult(&mut BinaryPolynomial(a, b);
+        let mut c = BinaryPolynomial(Array::<u64, U2>(a.clone()));
+        c *= &mut BinaryPolynomial(Array(b));
 
         let tmp: BinaryPolynomial<U127> = BinaryPolynomial(Array::<u64, U2>(a)) * &Array(b).into();
 
@@ -445,9 +476,8 @@ mod test {
         ];
         let b = [0xbc, 0x6f, 0x33];
 
-        let c: BinaryPolynomial<U175> =
-            BinaryPolynomial(Array(a)).low_stack_mul(&mut BinaryPolynomial(Array(b)));
-        // BinaryPolynomial::<U127>::low_stack_mult(&mut BinaryPolynomial(a, b);
+        let mut c = BinaryPolynomial(Array::<u64, U3>(a.clone()));
+        c *= &mut BinaryPolynomial(Array(b));
 
         let tmp: BinaryPolynomial<U175> = BinaryPolynomial(Array::<u64, U3>(a)) * &Array(b).into();
 
@@ -467,10 +497,13 @@ mod test {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut xof = XofState::new(&rng.random::<[u8; 16]>());
 
-        let mut a = xof.sample_vect::<Hqc>();
+        let a = xof.sample_vect::<Hqc>();
         let mut b = xof.sample_vect::<Hqc>();
 
-        assert_eq!(a.low_stack_mul(&mut b), a * &b);
+        let mut c = a.clone();
+        c *= &mut b;
+
+        assert_eq!(c, a * &b);
     }
 
     #[test]
